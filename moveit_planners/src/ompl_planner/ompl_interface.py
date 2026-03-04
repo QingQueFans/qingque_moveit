@@ -10,7 +10,6 @@ import yaml
 import os
 import sys
 
-# 导入修复后的客户端
 FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, FILE_DIR)
 
