@@ -1,0 +1,24 @@
+# STOMP规划器配置
+# 注意：当前系统未安装STOMP，此为预留配置
+
+status: not_installed
+
+# 配置模板（当STOMP安装后可用）
+configurations:
+  default:
+    stochastic:
+      num_trajectories: 20     # 轨迹数量
+      num_rollouts: 10         # 每次迭代的rollout数
+      noise_stddev: 0.1        # 噪声标准差
+    
+    optimization:
+      max_iterations: 100      # 最大迭代次数
+      learning_rate: 0.01      # 学习率
+    
+    regularization:
+      control_cost_weight: 0.1 # 控制代价权重
+
+# 安装提示
+installation_hint: |
+  要使用STOMP规划器，请先安装：
+  sudo apt install ros-${ROS_DISTRO}-moveit-planners-stomp

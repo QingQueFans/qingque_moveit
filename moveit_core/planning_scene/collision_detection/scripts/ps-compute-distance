@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""
+计算物体间距离
+"""
+import sys
+import os
+import argparse
+import json
+import time
+sys.path.append(os.path.expanduser('~/qingfu_moveit/moveit_core/planning_scene'))
+
+# ========== 设置路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
+sys.path.insert(0, CORE_SRC)
+
+DETECTION_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, DETECTION_SRC)
+
+OBJ_MODULE_ROOT = os.path.join(PROJECT_ROOT, 'collision_objects')
+OBJ_SRC = os.path.join(OBJ_MODULE_ROOT, 'src')
+sys.path.insert(0, OBJ_SRC)
+
+from ps_core.scene_client import PlanningSceneClient
+from ps_collision.distance_calculator import DistanceCalculator
+from ps_objects.object_manager import ObjectManager
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="计算物体间距离",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 计算两个物体间的距离
+  %(prog)s --objects "box1" "box2"
+  
+  # 计算到机器人的距离
+  %(prog)s --to-robot "obstacle"
+  
+  # 计算距离矩阵
+  %(prog)s --matrix "box1" "box2" "sphere1"
+  
+  # 查找最近物体
+  %(prog)s --nearest "target_box" --count 3
+  
+  # 从文件读取物体列表
+  %(prog)s --from-file objects.txt --matrix
+        """
+    )
+    
+    # 计算模式
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument('--objects', '-o', type=str, nargs=2,
+                          help='计算两个物体间的距离')
+    mode_group.add_argument('--to-robot', '-r', type=str,
+                          help='计算物体到机器人的距离')
+    mode_group.add_argument('--matrix', '-m', type=str, nargs='+',
+                          help='计算多个物体的距离矩阵')
+    mode_group.add_argument('--nearest', '-n', type=str,
+                          help='查找最近的物体')
+    mode_group.add_argument('--from-file', '-f', type=str,
+                          help='从文件读取物体列表')
+    
+    # 额外参数
+    parser.add_argument('--count', '-c', type=int, default=5,
+                       help='返回的最近物体数量（默认: 5）')
+    parser.add_argument('--robot-pos', type=str, default="0,0,0",
+                       help='机器人基座位置（默认: 0,0,0）')
+    
+    # 输出选项
+    parser.add_argument('--json', '-j', action='store_true',
+                       help='JSON格式输出')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='详细输出')
+    parser.add_argument('--units', choices=['m', 'cm', 'mm'], default='m',
+                       help='距离单位（默认: m）')
+    
+    args = parser.parse_args()
+    
+    try:
+        # 初始化
+        client = PlanningSceneClient()
+        calculator = DistanceCalculator(client)
+        manager = ObjectManager(client)        
+        # 单位转换因子
+        unit_factors = {'m': 1.0, 'cm': 100.0, 'mm': 1000.0}
+        factor = unit_factors[args.units]
+        
+        results = {}
+        
+        if args.objects:
+            # 计算两个物体间的距离
+            obj1, obj2 = args.objects
+            distance_result = calculator.compute_distance(obj1, obj2)
+            
+            if "error" in distance_result:
+                results = {"error": distance_result["error"]}
+            else:
+                # 应用单位转换
+                for key in ['center_distance', 'surface_distance', 
+                          'estimated_size1', 'estimated_size2']:
+                    if key in distance_result:
+                        distance_result[key] *= factor
+                
+                results = {
+                    "calculation_type": "pairwise_distance",
+                    "result": distance_result
+                }
+                
+        elif args.to_robot:
+            # 计算到机器人的距离
+            robot_pos = [float(x.strip()) for x in args.robot_pos.split(',')]
+            distance_result = calculator.compute_distance_to_robot(args.to_robot, robot_pos)
+            
+            if "error" in distance_result:
+                results = {"error": distance_result["error"]}
+            else:
+                # 应用单位转换
+                for key in ['distance', 'safe_distance', 'estimated_object_size']:
+                    if key in distance_result:
+                        distance_result[key] *= factor
+                
+                results = {
+                    "calculation_type": "distance_to_robot",
+                    "robot_position": robot_pos,
+                    "result": distance_result
+                }
+                
+        elif args.nearest:
+            # 查找最近物体
+            nearest_results = calculator.find_nearest_objects(args.nearest, args.count)
+            
+            if nearest_results and "error" in nearest_results[0]:
+                results = {"error": nearest_results[0]["error"]}
+            else:
+                # 应用单位转换
+                for item in nearest_results:
+                    for key in ['center_distance', 'surface_distance']:
+                        if key in item:
+                            item[key] *= factor
+                
+                results = {
+                    "calculation_type": "nearest_objects",
+                    "target_object": args.nearest,
+                    "max_count": args.count,
+                    "results": nearest_results
+                }
+                
+        elif args.matrix:
+            # 计算距离矩阵
+            object_ids = args.matrix
+            matrix_result = calculator.compute_distances_matrix(object_ids)
+            
+            if "error" in matrix_result:
+                results = {"error": matrix_result["error"]}
+            else:
+                # 应用单位转换到矩阵
+                import numpy as np
+                dist_matrix = np.array(matrix_result["distance_matrix"])
+                eff_matrix = np.array(matrix_result["surface_distance_matrix"])
+                
+                matrix_result["distance_matrix"] = (dist_matrix * factor).tolist()
+                matrix_result["surface_distance_matrix"] = (eff_matrix * factor).tolist()
+                
+                # 应用单位转换到成对结果
+                for key, value in matrix_result.get("pairwise_results", {}).items():
+                    for dist_key in ['center_distance', 'surface_distance', 
+                                   'estimated_size1', 'estimated_size2']:
+                        if dist_key in value:
+                            value[dist_key] *= factor
+                
+                results = {
+                    "calculation_type": "distance_matrix",
+                    "object_count": len(object_ids),
+                    "result": matrix_result
+                }
+                
+        elif args.from_file:            
+        # 从文件读取物体列表
+            with open(args.from_file, 'r') as f:
+                object_ids = [line.strip() for line in f if line.strip()]
+            
+            if len(object_ids) < 2:
+                print(f"错误：需要至少2个物体，文件中只有 {len(object_ids)} 个")
+                return 1
+            
+            matrix_result = calculator.compute_distances_matrix(object_ids)
+            
+            if "error" in matrix_result:
+                results = {"error": matrix_result["error"]}
+            else:
+                # 应用单位转换
+                import numpy as np
+                dist_matrix = np.array(matrix_result["distance_matrix"])
+                eff_matrix = np.array(matrix_result["surface_distance_matrix"])
+                
+                matrix_result["distance_matrix"] = (dist_matrix * factor).tolist()
+                matrix_result["surface_distance_matrix"] = (eff_matrix * factor).tolist()
+                
+                results = {
+                    "calculation_type": "distance_matrix_from_file",
+                    "file": args.from_file,
+                    "object_count": len(object_ids),
+                    "result": matrix_result
+                }        
+                
+        # 输出结果
+        if args.json:
+            print(json.dumps(results, indent=2))
+        else:
+            _print_human_readable(results, args.verbose, args.units)
+        
+        return 0
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+def _print_human_readable(results, verbose=False, units='m'):
+    """打印人类可读的结果"""
+    unit_symbol = {'m': 'm', 'cm': 'cm', 'mm': 'mm'}.get(units, 'm')
+    
+    print(f"\n距离计算结果 ({unit_symbol}):")
+    print("=" * 60)
+    
+    if "error" in results:
+        print(f"❌ 错误: {results['error']}")
+        return
+    
+    calc_type = results.get("calculation_type", "unknown")
+    
+    if calc_type == "pairwise_distance":
+        result = results["result"]
+        obj1 = result["object1"]
+        obj2 = result["object2"]
+        center_dist = result["center_distance"]
+        eff_dist = result["surface_distance"]
+        collision = result["collision"]
+        
+        print(f"物体: {obj1} ↔ {obj2}")
+        print(f"中心距离: {center_dist:.4f} {unit_symbol}")
+        print(f"有效距离: {eff_dist:.4f} {unit_symbol}")
+        print(f"碰撞状态: {'❌ 碰撞' if collision else '✅ 无碰撞'}")
+        
+        if verbose:
+            print(f"\n详细信息:")
+            print(f"  物体1位置: {result['position1']}")
+            print(f"  物体2位置: {result['position2']}")
+            print(f"  估计尺寸1: {result['estimated_size1']:.4f} {unit_symbol}")
+            print(f"  估计尺寸2: {result['estimated_size2']:.4f} {unit_symbol}")
+            
+    elif calc_type == "distance_to_robot":
+        result = results["result"]
+        obj_id = result["object_id"]
+        distance = result["distance"]
+        safe_dist = result["safe_distance"]
+        is_safe = result["is_safe"]
+        
+        print(f"物体: {obj_id}")
+        print(f"到机器人距离: {distance:.4f} {unit_symbol}")
+        print(f"安全距离: {safe_dist:.4f} {unit_symbol}")
+        print(f"安全状态: {'✅ 安全' if is_safe else '❌ 不安全'}")
+        
+        if verbose:
+            print(f"\n详细信息:")
+            print(f"  机器人位置: {results['robot_position']}")
+            print(f"  物体位置: {result['object_position']}")
+            print(f"  估计物体尺寸: {result['estimated_object_size']:.4f} {unit_symbol}")
+            
+    elif calc_type == "nearest_objects":
+        target = results["target_object"]
+        nearest_list = results["results"]
+        
+        print(f"目标物体: {target}")
+        print(f"\n最近的 {len(nearest_list)} 个物体:")
+        
+        for i, item in enumerate(nearest_list, 1):
+            obj_id = item["object_id"]
+            eff_dist = item["surface_distance"]
+            center_dist = item["center_distance"]
+            collision = item["collision"]
+            
+            print(f"{i:2d}. {obj_id:20s} 有效距离: {eff_dist:.4f} {unit_symbol} "
+                  f"{'(碰撞)' if collision else ''}")
+            
+            if verbose:
+                print(f"     中心距离: {center_dist:.4f} {unit_symbol}")
+                print(f"     位置: {item['position']}")
+                
+    elif "distance_matrix" in calc_type:
+        matrix_result = results["result"]
+        object_ids = matrix_result["object_ids"]
+        n = len(object_ids)
+        
+        print(f"物体数量: {n}")
+        print(f"距离矩阵 ({unit_symbol}):")        
+        # 打印简化的矩阵
+        if n <= 8 or verbose:
+            # 打印表头
+            print(" " * 12, end="")
+            for obj_id in object_ids:
+                print(f"{obj_id[:8]:8s} ", end="")
+            print()
+            
+            # 打印矩阵
+            dist_matrix = matrix_result["distance_matrix"]
+            for i in range(n):
+                print(f"{object_ids[i][:12]:12s}", end="")
+                for j in range(n):
+                    if i == j:
+                        print(f"{'--':8s} ", end="")
+                    else:
+                        dist = dist_matrix[i][j]
+                        if isinstance(dist, (int, float)) and not np.isnan(dist):
+                            print(f"{dist:8.3f} ", end="")
+                        else:
+                            print(f"{'N/A':8s} ", end="")
+                print()
+        else:
+            print(f"（矩阵太大，使用 --verbose 查看完整矩阵）")
+            
+        # 打印碰撞信息
+        collision_matrix = matrix_result["collision_matrix"]
+        collision_pairs = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                if collision_matrix[i][j]:
+                    collision_pairs.append((object_ids[i], object_ids[j]))
+        
+        if collision_pairs:
+            print(f"\n❌ 碰撞物体对 ({len(collision_pairs)}):")
+            for obj1, obj2 in collision_pairs:
+                print(f"  {obj1} ↔ {obj2}")
+        else:
+            print(f"\n✅ 无碰撞物体对")
+    
+    print(f"\n计算时间: {results.get('result', {}).get('timestamp', '未知')}")
+
+if __name__ == "__main__":
+    import numpy as np
+    sys.exit(main())

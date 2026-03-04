@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""停止当前执行的轨迹"""
+import sys
+import os
+import rclpy
+
+# ========== 正确的路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+# 找到moveit_ros根目录
+current_dir = os.path.dirname(PROJECT_ROOT)
+while current_dir:
+    dir_name = os.path.basename(current_dir)
+    if dir_name == 'moveit_ros':
+        MOVEIT_ROS_ROOT = current_dir
+        MOVEIT_CORE_ROOT = os.path.join(os.path.dirname(current_dir), 'moveit_core')
+        MOVEIT_PLUGINS_ROOT = os.path.join(os.path.dirname(current_dir), 'moveit_plugins')
+        break
+    current_dir = os.path.dirname(current_dir)
+
+# 设置路径
+TRAJECTORY_EXECUTION_SRC = os.path.join(MODULE_ROOT, 'src')
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+
+sys.path.insert(0, TRAJECTORY_EXECUTION_SRC)
+sys.path.insert(0, PLANNING_SCENE_SRC)
+
+print(f"[停止执行] 路径设置:")
+print(f"  当前模块: {TRAJECTORY_EXECUTION_SRC}")
+print(f"  规划场景: {PLANNING_SCENE_SRC}")
+
+# ========== 导入检查 ==========
+try:
+    from trajectory_execution import TrajectoryExecutionManager
+    HAS_DEPENDENCIES = True
+except ImportError as e:
+    print(f"❌ 导入依赖失败: {e}")
+    HAS_DEPENDENCIES = False
+
+def main():
+    if not HAS_DEPENDENCIES:
+        print("❌ 依赖导入失败")
+        return 1
+    
+    try:
+        if not rclpy.ok():
+            rclpy.init()
+        
+        print("🛑 尝试停止当前执行...")
+        executor = TrajectoryExecutionManager(None, use_controller_plugin=False)
+        result = executor.stop()
+        
+        print("\n" + "="*60)
+        if result.get("success", False):
+            print("✅ 停止命令已发送")
+            if "execution_time" in result:
+                print(f"   执行时间: {result['execution_time']:.3f}秒")
+        else:
+            print("❌ 停止失败")
+            print(f"   错误: {result.get('error', '未知错误')}")
+        print("="*60)
+        
+        executor.destroy()
+        return 0 if result.get("success", False) else 1
+        
+    except Exception as e:
+        print(f"❌ 停止异常: {e}")
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

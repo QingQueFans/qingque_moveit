@@ -1,0 +1,16 @@
+# moveit_plugins/controller_manager/config/controllers.yaml
+controllers:
+  joint_trajectory_controller:
+    type: FollowJointTrajectory
+    action_name: "/joint_trajectory_controller/follow_joint_trajectory"
+    joints: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+    state_topic: "/joint_trajectory_controller/state"
+    command_topic: "/joint_trajectory_controller/commands"
+    
+  position_controller:
+    type: PositionJointInterface
+    joints: ["joint1", "joint2", "joint3"]
+    
+  velocity_controller:
+    type: VelocityJointInterface
+    joints: ["joint4", "joint5", "joint6"]

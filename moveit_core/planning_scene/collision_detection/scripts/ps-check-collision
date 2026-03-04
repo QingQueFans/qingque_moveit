@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""
+检查物体碰撞
+"""
+import sys
+import os
+import argparse
+import json
+sys.path.append(os.path.expanduser('~/qingfu_moveit/moveit_core/planning_scene'))
+
+# ========== 设置路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # scripts/
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)                # collision_detection/
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)              # planning_scene/
+
+# 添加 core_functions 的 src 到路径
+CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
+sys.path.insert(0, CORE_SRC)
+
+# 添加 collision_detection 的 src 到路径
+DETECTION_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, DETECTION_SRC)
+
+# 添加 collision_objects 的 src 到路径（依赖）
+OBJ_MODULE_ROOT = os.path.join(PROJECT_ROOT, 'collision_objects')
+OBJ_SRC = os.path.join(OBJ_MODULE_ROOT, 'src')
+sys.path.insert(0, OBJ_SRC)
+
+# 现在可以正常导入
+from ps_core.scene_client import PlanningSceneClient
+from ps_collision.collision_checker import CollisionChecker
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="检查物体碰撞",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 检查两个物体的碰撞
+  %(prog)s --objects "box1" "box2"
+  
+  # 检查场景中所有物体的碰撞
+  %(prog)s --all
+  
+  # 检查复合物体的自碰撞
+  %(prog)s --self "composite_object"
+  
+  # 从文件读取物体列表
+  %(prog)s --from-file objects.txt
+  
+  # 使用JSON格式输出
+  %(prog)s --json
+        """
+    )
+    
+    # 检查模式
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument('--objects', '-o', type=str, nargs=2,
+                          help='检查两个物体的碰撞')
+    mode_group.add_argument('--all', '-a', action='store_true',
+                          help='检查场景中所有物体的碰撞')
+    mode_group.add_argument('--self', '-s', type=str,
+                          help='检查复合物体的自碰撞')
+    mode_group.add_argument('--from-file', '-f', type=str,
+                          help='从文件读取物体列表')
+    
+    # 排除选项
+    parser.add_argument('--exclude', '-e', type=str, nargs=2, action='append',
+                       help='排除的物体对（可多次使用）')
+    
+    # 输出选项
+    parser.add_argument('--json', '-j', action='store_true',
+                       help='JSON格式输出')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='详细输出')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='安静模式，只输出必要信息')
+    
+    args = parser.parse_args()
+    
+    try:
+        # 初始化
+        client = PlanningSceneClient()
+        checker = CollisionChecker(client)
+        
+        results = {}
+        
+        if args.objects:
+            # 检查两个物体的碰撞
+            obj1, obj2 = args.objects
+            collision, info = checker.check_collision(obj1, obj2)
+            
+            results = {
+                "check_type": "pairwise",
+                "object1": obj1,
+                "object2": obj2,
+                "collision": collision,
+                "details": info
+            }
+            
+        elif args.all:
+            # 检查所有物体的碰撞
+            exclude_pairs = args.exclude if args.exclude else None
+            results = checker.check_scene_collisions(exclude_pairs)
+            
+        elif args.self:            
+            # 检查自碰撞
+            collision, info = checker.check_self_collision(args.self)
+            
+            results = {
+                "check_type": "self_collision",
+                "object": args.self,
+                "self_collision": collision,
+                "details": info
+            }
+            
+        elif args.from_file:
+            # 从文件读取物体列表
+            with open(args.from_file, 'r') as f:
+                object_ids = [line.strip() for line in f if line.strip()]
+            
+            if len(object_ids) < 2:
+                print(f"错误：需要至少2个物体，文件中只有 {len(object_ids)} 个")
+                return 1
+            
+            results = checker.check_multiple_collisions(object_ids)
+        
+        # 输出结果
+        if args.json:
+            print(json.dumps(results, indent=2))
+        elif args.quiet:
+            if "collision" in results:
+                print("碰撞" if results["collision"] else "无碰撞")
+            elif "total_collisions" in results:
+                print(f"总碰撞数: {results['total_collisions']}")
+        else:
+            _print_human_readable(results, args.verbose)
+        
+        return 0
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+def _print_human_readable(results, verbose=False):
+    """打印人类可读的结果"""
+    print("\n碰撞检查结果:")
+    print("=" * 50)
+    
+    if "error" in results:
+        print(f"❌ 错误: {results['error']}")
+        return
+    
+    if results.get("check_type") == "pairwise":
+        obj1 = results["object1"]
+        obj2 = results["object2"]
+        collision = results["collision"]
+        
+        if collision:
+            print(f"❌ 发生碰撞: {obj1} ↔ {obj2}")
+            if verbose and "details" in results:
+                details = results["details"]
+                if "details" in details:
+                    print("碰撞详情:")
+                    for key, value in details["details"].items():
+                        if isinstance(value, (int, float)):
+                            print(f"  {key}: {value:.4f}")
+                        else:
+                            print(f"  {key}: {value}")
+        else:
+            print(f"✅ 无碰撞: {obj1} ↔ {obj2}")
+            
+    elif results.get("check_type") == "self_collision":
+        obj = results["object"]
+        collision = results["self_collision"]
+        
+        if collision:
+            print(f"❌ 自碰撞: {obj}")
+            if verbose and "details" in results:
+                details = results["details"]
+                print(f"部件数量: {details.get('part_count', 0)}")
+                if "collision_details" in details:
+                    for cd in details["collision_details"]:
+                        print(f"  部件 {cd['part1']} ↔ 部件 {cd['part2']}: 距离 {cd['distance']:.3f}")
+        else:
+            print(f"✅ 无自碰撞: {obj}")
+            
+    elif "total_collisions" in results:
+        total = results["total_collisions"]
+        object_count = results.get("total_objects", "未知")
+        
+        print(f"场景物体数: {object_count}")
+        print(f"总碰撞数: {total}")
+        
+        if total > 0 and "collision_pairs" in results:
+            print("\n碰撞物体对:")
+            for pair in results["collision_pairs"]:
+                print(f"  ❌ {pair['object1']} ↔ {pair['object2']}")
+                
+                if verbose and "details" in pair:
+                    details = pair["details"]
+                    if isinstance(details, dict) and "details" in details:
+                        dd = details["details"]
+                        print(f"    距离: x={dd.get('distance_x', 0):.3f}, "
+                              f"y={dd.get('distance_y', 0):.3f}, "
+                              f"z={dd.get('distance_z', 0):.3f}")
+    
+    print(f"\n检查时间: {results.get('timestamp', '未知')}")
+
+if __name__ == "__main__":
+    sys.exit(main())

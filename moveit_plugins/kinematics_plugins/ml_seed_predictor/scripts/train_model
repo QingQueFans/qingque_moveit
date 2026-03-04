@@ -1,0 +1,13 @@
+#!/bin/bash
+"""
+手动训练模型脚本
+"""
+cd "$(dirname "$0")/.."
+python3 -c "
+from src.ml_seed_predictor import MLSeedPredictor
+predictor = MLSeedPredictor()
+if predictor.train():
+    print('✅ 模型训练成功')
+else:
+    print('❌ 模型训练失败，可能需要更多数据')
+"

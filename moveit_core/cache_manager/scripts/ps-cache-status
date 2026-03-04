@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+# 查看缓存状态脚本
+#!/usr/bin/env python3
+"""
+ps-cache-status: 缓存状态查询脚本
+显示所有缓存的统计信息和状态
+"""
+import sys
+import os
+import json
+from pathlib import Path
+
+# ========== 路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+
+CACHE_MANAGER_SRC=os.path.join(MODULE_ROOT,'src')
+sys.path.insert(0, CACHE_MANAGER_SRC)
+
+
+try:
+    from ps_cache.cache_manager import CachePathTools
+    HAS_DEPS = True
+except ImportError as e:
+    print(f"导入失败: {e}")
+    HAS_DEPS = False
+    sys.exit(1)
+
+def format_size(bytes_size):
+    """格式化文件大小"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes_size < 1024.0:
+            return f"{bytes_size:.2f} {unit}"
+        bytes_size /= 1024.0
+    return f"{bytes_size:.2f} TB"
+
+def get_directory_stats(directory):
+    """获取目录统计信息"""
+    if not directory.exists():
+        return {'file_count': 0, 'size_bytes': 0, 'size_formatted': '0 B'}
+    
+    total_size = 0
+    file_count = 0
+    
+    for item in directory.rglob('*'):
+        if item.is_file():
+            total_size += item.stat().st_size
+            file_count += 1
+    
+    return {
+        'file_count': file_count,
+        'size_bytes': total_size,
+        'size_formatted': format_size(total_size)
+    }
+
+def main():
+    """主函数"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='缓存状态查询')
+    parser.add_argument('--category', type=str, 
+                       choices=['all', 'core', 'kinematics', 'grasping', 'planning'],
+                       default='all',
+                       help='查询的缓存类别')
+    parser.add_argument('--json', action='store_true',
+                       help='输出JSON格式')
+    parser.add_argument('--verbose', '-v', action='count', default=0,
+                       help='详细输出级别')
+    
+    args = parser.parse_args()
+    
+    # 初始化缓存
+    CachePathTools.initialize()
+    cache_root = CachePathTools.get_cache_root()
+    
+    if not cache_root.exists():
+        if args.json:
+            print(json.dumps({'error': '缓存目录不存在', 'cache_root': str(cache_root)}, indent=2))
+        else:
+            print(f"错误: 缓存目录不存在")
+            print(f"路径: {cache_root}")
+        return 1
+    
+    # 收集统计信息
+    stats = {
+        'cache_root': str(cache_root),
+        'total': {'file_count': 0, 'size_bytes': 0},
+        'categories': {}
+    }
+    
+    # 定义所有类别
+    categories = {
+        'core': ['objects'],
+        'kinematics': ['ik_solutions', 'fk_results', 'jacobian_cache', 'performance'],
+        'grasping': ['grasp_poses', 'quality_scores', 'execution_logs'],
+        'planning': ['trajectories', 'collision_checks', 'search_trees']
+    }
+    
+    # 收集数据
+    for category, subcategories in categories.items():
+        if args.category not in ['all', category]:
+            continue
+        
+        category_stats = {
+            'file_count': 0,
+            'size_bytes': 0,
+            'subcategories': {}
+        }
+        
+        for subcat in subcategories:
+            subcat_dir = cache_root / category / subcat
+            subcat_stats = get_directory_stats(subcat_dir)
+            
+            category_stats['subcategories'][subcat] = subcat_stats
+            category_stats['file_count'] += subcat_stats['file_count']
+            category_stats['size_bytes'] += subcat_stats['size_bytes']
+        
+        category_stats['size_formatted'] = format_size(category_stats['size_bytes'])
+        stats['categories'][category] = category_stats
+        stats['total']['file_count'] += category_stats['file_count']
+        stats['total']['size_bytes'] += category_stats['size_bytes']
+    
+    stats['total']['size_formatted'] = format_size(stats['total']['size_bytes'])    # 输出结果
+    if args.json:
+        print(json.dumps(stats, indent=2, default=str))
+        return 0
+    
+    # 人类可读输出
+    print("=" * 60)
+    print("缓存系统状态报告")
+    print("=" * 60)
+    print(f"缓存根目录: {stats['cache_root']}")
+    print(f"总文件数: {stats['total']['file_count']}")
+    print(f"总大小: {stats['total']['size_formatted']}")
+    print()
+    
+    for category, cat_stats in stats['categories'].items():
+        print(f"【{category.upper()}】")
+        print(f"  文件数: {cat_stats['file_count']}")
+        print(f"  大小: {cat_stats['size_formatted']}")
+        
+        if args.verbose >= 1:
+            for subcat, sub_stats in cat_stats['subcategories'].items():
+                if sub_stats['file_count'] > 0:
+                    print(f"  - {subcat}: {sub_stats['file_count']} 文件, {sub_stats['size_formatted']}")
+        
+        if args.verbose >= 2:
+            # 列出具体文件
+            for subcat in categories[category]:
+                subcat_dir = cache_root / category / subcat
+                if subcat_dir.exists():
+                    files = list(subcat_dir.glob('*'))
+                    if files:
+                        print(f"  - {subcat} 目录内容:")
+                        for f in sorted(files)[:10]:  # 最多显示10个
+                            size = format_size(f.stat().st_size) if f.is_file() else '(目录)'
+                            print(f"      {f.name} ({size})")
+                        if len(files) > 10:
+                            print(f"      ... 还有 {len(files) - 10} 个文件")
+        print()
+    
+    # 清理建议
+    if stats['total']['file_count'] == 0:
+        print("提示: 缓存目录为空，可以运行缓存测试来生成数据")
+    elif stats['total']['size_bytes'] > 1024 * 1024 * 100:  # 大于100MB
+        print("提示: 缓存大小超过100MB，建议清理旧文件")
+        print("      使用: ps-cache-clear --older-than 30")
+    
+    print("=" * 60)
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main())

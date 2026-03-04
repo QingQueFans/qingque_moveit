@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+# 清理缓存脚本
+#!/usr/bin/env python3
+"""
+ps-cache-clear: 缓存清理脚本
+清理指定类型或过期的缓存文件
+"""
+import sys
+import os
+import json
+import time
+from pathlib import Path
+import shutil
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+
+CACHE_MANAGER_SRC=os.path.join(MODULE_ROOT,'src')
+sys.path.insert(0, CACHE_MANAGER_SRC)
+
+try:
+    from ps_cache.cache_manager import CachePathTools
+    HAS_DEPS = True
+except ImportError as e:
+    print(f"导入失败: {e}")
+    HAS_DEPS = False
+    sys.exit(1)
+
+def clean_directory(directory, max_age_days=None, dry_run=False):
+    """清理目录中的文件"""
+    if not directory.exists():
+        return {'deleted': 0, 'size_freed': 0, 'errors': 0}
+    
+    deleted = 0
+    size_freed = 0
+    errors = 0
+    current_time = time.time()
+    
+    for item in directory.rglob('*'):
+        if item.is_file():
+            # 检查文件年龄
+            if max_age_days is not None:
+                file_age = current_time - item.stat().st_mtime
+                max_age_seconds = max_age_days * 24 * 3600
+                if file_age <= max_age_seconds:
+                    continue  # 文件不够旧，不删除
+            
+            try:
+                file_size = item.stat().st_size
+                if not dry_run:
+                    item.unlink()
+                deleted += 1
+                size_freed += file_size
+            except Exception as e:
+                errors += 1
+                print(f"删除失败 {item}: {e}")
+    
+    return {
+        'deleted': deleted,
+        'size_freed': size_freed,
+        'errors': errors
+    }
+
+def format_size(bytes_size):
+    """格式化文件大小"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes_size < 1024.0:
+            return f"{bytes_size:.2f} {unit}"
+        bytes_size /= 1024.0
+    return f"{bytes_size:.2f} TB"
+
+def main():
+    """主函数"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='缓存清理工具')
+    
+    # 清理范围
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--all', action='store_true',
+                      help='清理所有缓存')
+    group.add_argument('--category', type=str,
+                      choices=['core', 'kinematics', 'grasping', 'planning'],
+                      help='清理指定类别的缓存')
+    group.add_argument('--subcategory', type=str,
+                      help='清理指定子类别的缓存，格式: "category/subcategory"')
+    
+    # 清理条件
+    parser.add_argument('--older-than', type=int,
+                       help='清理指定天数前的文件（单位: 天）')
+    parser.add_argument('--larger-than', type=str,
+                       help='清理大于指定大小的文件，如: "10MB", "1GB"')
+    parser.add_argument('--pattern', type=str,
+                       help='文件匹配模式，如: "*.tmp", "temp_*"')
+    
+    # 操作选项
+    parser.add_argument('--dry-run', action='store_true',
+                       help='模拟运行，不实际删除文件')
+    parser.add_argument('--force', '-f', action='store_true',
+                       help='强制清理，不确认')
+    parser.add_argument('--json', action='store_true',
+                       help='输出JSON格式')
+    parser.add_argument('--verbose', '-v', action='count', default=0,
+                       help='详细输出')
+    
+    args = parser.parse_args()
+    
+    # 检查参数
+    if not (args.all or args.category or args.subcategory):
+        parser.error("请指定清理范围: --all, --category, 或 --subcategory")
+    
+    # 初始化缓存
+    CachePathTools.initialize()
+    cache_root = CachePathTools.get_cache_root()
+    
+    if not cache_root.exists():
+        result = {'error': '缓存目录不存在', 'cache_root': str(cache_root)}
+        print(json.dumps(result, indent=2) if args.json else f"错误: {result['error']}")
+        return 1
+    
+    # 确认操作
+    if not args.force and not args.dry_run:
+        print("警告: 这将删除缓存文件！")
+        if args.all:
+            print(f"清理范围: 所有缓存")
+        elif args.category:
+            print(f"清理范围: {args.category} 类别")
+        elif args.subcategory:
+            print(f"清理范围: {args.subcategory}")
+        
+        if args.older_than:
+            print(f"条件: {args.older_than} 天前的文件")
+        
+        response = input("确认清理？(y/N): ")
+        if response.lower() != 'y':
+            print("取消操作")
+            return 0    # 确定清理目录
+    directories_to_clean = []
+    
+    if args.all:
+        # 清理所有目录
+        for category in ['core', 'kinematics', 'grasping', 'planning']:
+            category_dir = cache_root / category
+            if category_dir.exists():
+                for subcat in category_dir.iterdir():
+                    if subcat.is_dir():
+                        directories_to_clean.append(subcat)
+    
+    elif args.category:
+        # 清理指定类别
+        category_dir = cache_root / args.category
+        if category_dir.exists():
+            for subcat in category_dir.iterdir():
+                if subcat.is_dir():
+                    directories_to_clean.append(subcat)
+    
+    elif args.subcategory:
+        # 清理指定子类别
+        try:
+            category, subcategory = args.subcategory.split('/')
+            target_dir = cache_root / category / subcategory
+            if target_dir.exists():
+                directories_to_clean.append(target_dir)
+        except ValueError:
+            parser.error("--subcategory 格式应为: 'category/subcategory'")
+    
+    # 执行清理
+    total_stats = {
+        'directories_processed': 0,
+        'total_deleted': 0,
+        'total_size_freed': 0,
+        'total_errors': 0,
+        'details': []
+    }
+    
+    for directory in directories_to_clean:
+        if args.verbose >= 1:
+            print(f"处理目录: {directory.relative_to(cache_root)}")
+        
+        stats = clean_directory(
+            directory=directory,
+            max_age_days=args.older_than,
+            dry_run=args.dry_run
+        )
+        
+        total_stats['directories_processed'] += 1
+        total_stats['total_deleted'] += stats['deleted']
+        total_stats['total_size_freed'] += stats['size_freed']
+        total_stats['total_errors'] += stats['errors']
+        
+        total_stats['details'].append({
+            'directory': str(directory.relative_to(cache_root)),
+            'deleted': stats['deleted'],
+            'size_freed': stats['size_freed'],
+            'errors': stats['errors']
+        })
+    
+    # 输出结果
+    total_stats['total_size_freed_formatted'] = format_size(total_stats['total_size_freed'])
+    
+    if args.json:
+        print(json.dumps(total_stats, indent=2, default=str))
+        return 0
+    
+    # 人类可读输出
+    print("\n" + "=" * 60)
+    print("缓存清理完成")
+    print("=" * 60)
+    
+    if args.dry_run:
+        print("模式: 模拟运行（未实际删除）")
+    
+    print(f"处理目录数: {total_stats['directories_processed']}")
+    print(f"删除文件数: {total_stats['total_deleted']}")
+    print(f"释放空间: {total_stats['total_size_freed_formatted']}")
+    print(f"错误数: {total_stats['total_errors']}")
+    
+    if args.verbose >= 1:
+        print("\n详细结果:")
+        for detail in total_stats['details']:
+            if detail['deleted'] > 0 or detail['errors'] > 0:
+                size_freed = format_size(detail['size_freed'])
+                print(f"  {detail['directory']}: {detail['deleted']} 文件, {size_freed}, {detail['errors']} 错误")
+    
+    if total_stats['total_errors'] > 0:
+        print("\n警告: 清理过程中出现错误，部分文件可能未被删除")
+    
+    print("=" * 60)
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main())

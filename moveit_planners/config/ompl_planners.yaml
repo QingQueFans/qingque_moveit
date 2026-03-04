@@ -1,0 +1,33 @@
+# OMPL规划器配置
+# 简洁实用的配置模式
+
+planners:
+  # RRTConnect - 快速可靠，适合大多数场景
+  rrt_connect:
+    type: geometric::RRTConnect
+    parameters:
+      range: 0.1            # 最大扩展步长
+      goal_bias: 0.05       # 目标偏向概率
+      max_planning_time: 5.0 # 最大规划时间(秒)
+  
+  # RRTstar - 渐进最优，适合需要高质量路径
+  rrt_star:
+    type: geometric::RRTstar  
+    parameters:
+      range: 0.1
+      goal_bias: 0.05
+      delay_collision_checking: true
+  
+  # PRM - 适合固定环境的重复规划
+  prm:
+    type: geometric::PRM
+    parameters:
+      max_nearest_neighbors: 10
+      roadmap_vertices: 50
+
+# 默认设置
+defaults:
+  planner: rrt_connect       # 默认使用RRTConnect
+  planning_time: 5.0         # 默认规划时间
+  simplify: true             # 简化路径
+  interpolate: true          # 插值平滑

@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""
+从验证结果中提取和分析违规信息
+"""
+import sys
+import os
+import argparse
+import json
+import time
+
+# ========== 设置路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
+sys.path.insert(0, CORE_SRC)
+
+DETECTION_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, DETECTION_SRC)
+
+OBJ_MODULE_ROOT = os.path.join(PROJECT_ROOT, 'collision_objects')
+OBJ_SRC = os.path.join(OBJ_MODULE_ROOT, 'src')
+sys.path.insert(0, OBJ_SRC)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="从验证结果中提取和分析违规信息",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 从验证结果文件提取违规信息
+  %(prog)s --results-file validation_results.json
+  
+  # 提取特定类型的违规
+  %(prog)s --results-file results.json --type collision
+  
+  # 提取高严重度的违规
+  %(prog)s --results-file results.json --severity high
+  
+  # 统计违规信息
+  %(prog)s --results-file results.json --stats-only
+  
+  # 生成修复报告
+  %(prog)s --results-file results.json --generate-report
+  
+  # 过滤特定检查类型的违规
+  %(prog)s --results-file results.json --check-type joint_limits
+  
+  # 从多个文件合并分析
+  %(prog)s --results-files results1.json results2.json results3.json
+  
+  # JSON格式输出
+  %(prog)s --results-file validation_results.json --json
+        """
+    )
+    
+    # 输入文件选项
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument('--results-file', '-f', type=str,
+                           help='验证结果文件路径（JSON格式）')
+    input_group.add_argument('--results-files', '-F', type=str, nargs='+',
+                           help='多个验证结果文件路径')
+    input_group.add_argument('--stdin', '-i', action='store_true',
+                           help='从标准输入读取验证结果')
+    
+    # 过滤选项
+    parser.add_argument('--type', '-t', type=str,
+                       help='过滤特定类型的违规（如：collision, joint_limit等）')
+    parser.add_argument('--severity', '-s', choices=['high', 'medium', 'low'],
+                       help='过滤特定严重度的违规')
+    parser.add_argument('--check-type', '-c', type=str,
+                       help='过滤特定检查类型的违规')
+    parser.add_argument('--min-violation', type=float, default=0.0,
+                       help='最小违规量阈值（用于数值型违规）')
+    
+    # 输出选项
+    parser.add_argument('--json', '-j', action='store_true',
+                       help='JSON格式输出')
+    parser.add_argument('--stats-only', action='store_true',
+                       help='只显示统计信息，不显示详细违规')
+    parser.add_argument('--generate-report', '-r', action='store_true',
+                       help='生成修复报告')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='详细输出')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='安静模式')
+    
+    args = parser.parse_args()
+    
+    try:        # 加载验证结果
+        all_results = []
+        
+        if args.results_file:
+            with open(args.results_file, 'r') as f:
+                results = json.load(f)
+            all_results.append({
+                "file": args.results_file,
+                "results": results
+            })
+            
+        elif args.results_files:
+            for filepath in args.results_files:
+                try:
+                    with open(filepath, 'r') as f:
+                        results = json.load(f)
+                    all_results.append({
+                        "file": filepath,
+                        "results": results
+                    })
+                except Exception as e:
+                    print(f"警告：无法加载文件 {filepath}: {e}")
+                    
+        elif args.stdin:
+            try:
+                results = json.load(sys.stdin)
+                all_results.append({
+                    "file": "stdin",
+                    "results": results
+                })
+            except json.JSONDecodeError as e:
+                print(f"错误：无效的JSON输入: {e}")
+                return 1
+        
+        if not all_results:
+            print("错误：没有加载到任何验证结果")
+            return 1
+        
+        # 分析违规信息
+        analysis_results = analyze_violations(all_results, args)
+        
+        # 输出结果
+        if args.json:
+            print(json.dumps(analysis_results, indent=2, default=str))
+        elif not args.quiet:
+            _print_violation_analysis(analysis_results, args)
+        
+        return 0
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+def analyze_violations(all_results, args):
+    """分析违规信息"""
+    analysis = {
+        "analysis_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "total_files": len(all_results),
+        "total_results": 0,
+        "total_violations": 0,
+        "filtered_violations": 0,
+        "violations_by_type": {},
+        "violations_by_severity": {},
+        "violations_by_check_type": {},
+        "filtered_violations_list": [],
+        "file_summaries": [],
+        "suggestions": []
+    }
+    
+    # 收集所有违规
+    all_violations = []
+    
+    for file_data in all_results:
+        filepath = file_data["file"]
+        results = file_data["results"]
+        
+        file_summary = {
+            "file": filepath,
+            "result_id": results.get("trajectory_id", results.get("state_id", "unknown")),
+            "result_type": "trajectory" if "trajectory_id" in results else "state",
+            "valid": results.get("valid", results.get("satisfied", True)),
+            "violations_count": 0,
+            "filtered_violations_count": 0
+        }
+        
+        # 提取违规
+        violations = []
+        
+        # 从状态验证结果提取
+        if "violations" in results:
+            for violation in results["violations"]:
+                violations.append(violation)
+        
+        # 从约束检查结果提取
+        if "constraint_details" in results:
+            for constraint_detail in results["constraint_details"]:
+                if not constraint_detail.get("satisfied", True) and "violations" in constraint_detail:
+                    violations.extend(constraint_detail["violations"])
+        
+        # 从轨迹验证的各检查结果提取
+        for key in results.keys():
+            if key.endswith("_result") and isinstance(results[key], dict):
+                check_result = results[key]
+                if "violations" in check_result:
+                    for violation in check_result["violations"]:
+                        violation["source_check"] = key.replace("_result", "")
+                        violations.append(violation)
+        
+        file_summary["violations_count"] = len(violations)
+        all_violations.extend([(filepath, v) for v in violations])
+        
+        analysis["file_summaries"].append(file_summary)
+    
+    analysis["total_violations"] = len(all_violations)    
+    # 应用过滤
+    filtered_violations = []
+    
+    for filepath, violation in all_violations:
+        # 类型过滤
+        if args.type and args.type not in violation.get("type", ""):
+            continue
+        
+        # 严重度过滤
+        if args.severity and violation.get("severity") != args.severity:
+            continue
+        
+        # 检查类型过滤
+        if args.check_type and violation.get("check_type") != args.check_type:
+            continue
+        
+        # 最小违规量过滤
+        if args.min_violation > 0:
+            violation_amount = violation.get("violation_amount", violation.get("distance", 0))
+            if violation_amount < args.min_violation:
+                continue
+        
+        filtered_violations.append({
+            "file": filepath,
+            **violation
+        })
+    
+    analysis["filtered_violations"] = len(filtered_violations)
+    analysis["filtered_violations_list"] = filtered_violations
+    
+    # 统计信息
+    for _, violation in all_violations:
+        # 按类型统计
+        violation_type = violation.get("type", "unknown")
+        analysis["violations_by_type"][violation_type] = analysis["violations_by_type"].get(violation_type, 0) + 1
+        
+        # 按严重度统计
+        severity = violation.get("severity", "medium")
+        analysis["violations_by_severity"][severity] = analysis["violations_by_severity"].get(severity, 0) + 1        # 按检查类型统计
+        check_type = violation.get("check_type", "unknown")
+        analysis["violations_by_check_type"][check_type] = analysis["violations_by_check_type"].get(check_type, 0) + 1
+    
+    # 生成修复建议
+    if args.generate_report:
+        analysis["suggestions"] = generate_repair_suggestions(filtered_violations)
+    
+    return analysis
+
+def generate_repair_suggestions(violations):
+    """生成修复建议"""
+    suggestions = []
+    
+    # 按类型分类违规
+    violations_by_type = {}
+    for violation in violations:
+        violation_type = violation.get("type", "unknown")
+        if violation_type not in violations_by_type:
+            violations_by_type[violation_type] = []
+        violations_by_type[violation_type].append(violation)
+    
+    # 为每种类型生成建议
+    for violation_type, type_violations in violations_by_type.items():
+        count = len(type_violations)
+        
+        if violation_type == "collision" or "collision" in violation_type:
+            objects = set()
+            for v in type_violations:
+                if "object2" in v:
+                    objects.add(v["object2"])
+                elif "colliding_objects" in v:
+                    for obj in v["colliding_objects"]:
+                        objects.add(obj)
+            
+            if objects:
+                suggestions.append({
+                    "type": "collision",
+                    "priority": "high",
+                    "description": f"发现 {count} 个碰撞违规",
+                    "recommendation": f"调整机器人路径以避免与以下物体碰撞: {', '.join(list(objects)[:5])}{'...' if len(objects) > 5 else ''}",
+                    "affected_objects": list(objects)[:10]
+                })
+        
+        elif violation_type == "joint_limit" or "joint_limit" in violation_type:
+            joints = {}
+            for v in type_violations:
+                joint_idx = v.get("joint_index")
+                if joint_idx is not None:
+                    if joint_idx not in joints:
+                        joints[joint_idx] = {"lower": 0, "upper": 0}
+                    
+                    if v.get("limit_type") == "lower":
+                        joints[joint_idx]["lower"] += 1
+                    else:
+                        joints[joint_idx]["upper"] += 1
+            
+            if joints:
+                suggestions.append({
+                    "type": "joint_limit",
+                    "priority": "high",
+                    "description": f"发现 {count} 个关节限位违规",
+                    "recommendation": f"重新规划以下关节的运动范围: {', '.join([f'关节{j}' for j in joints.keys()][:5])}",
+                    "affected_joints": list(joints.keys())[:10]
+                })
+        
+        elif violation_type == "velocity_limit" or "velocity" in violation_type:
+            max_velocity = max([v.get("velocity", 0) for v in type_violations])
+            suggestions.append({
+                "type": "velocity",
+                "priority": "medium",
+                "description": f"发现 {count} 个速度限制违规",
+                "recommendation": f"降低最大速度至当前最大速度的80% ({max_velocity*0.8:.2f})",
+                "current_max_velocity": max_velocity
+            })
+        
+        elif "constraint" in violation_type:
+            suggestions.append({
+                "type": "constraint",
+                "priority": "medium",
+                "description": f"发现 {count} 个约束违规",
+                "recommendation": "重新评估约束条件或调整轨迹以满足约束"
+            })
+        
+        else:
+            suggestions.append({
+                "type": violation_type,
+                "priority": "low",
+                "description": f"发现 {count} 个{ violation_type}违规",
+                "recommendation": "检查并修复相关配置"
+            })    # 按优先级排序
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    suggestions.sort(key=lambda x: priority_order.get(x["priority"], 3))
+    
+    return suggestions
+
+def _print_violation_analysis(analysis, args):
+    """打印违规分析结果"""
+    print("\n" + "="*60)
+    print("违规信息分析")
+    print("="*60)
+    
+    print(f"分析时间: {analysis.get('analysis_timestamp', '未知')}")
+    print(f"分析文件数: {analysis.get('total_files', 0)}")
+    print(f"总违规数: {analysis.get('total_violations', 0)}")
+    print(f"过滤后违规数: {analysis.get('filtered_violations', 0)}")
+    
+    # 显示文件摘要
+    if not args.quiet:
+        print(f"\n文件摘要:")
+        print("-" * 40)
+        
+        for summary in analysis.get("file_summaries", []):
+            status = "✅" if summary.get("valid", True) else "❌"
+            print(f"{status} {summary['file']:30s} 违规: {summary['violations_count']:3d} 个")
+    
+    # 显示统计信息
+    print(f"\n违规统计:")
+    print("-" * 40)
+    
+    # 按类型统计
+    violations_by_type = analysis.get("violations_by_type", {})
+    if violations_by_type:
+        print("按类型统计:")
+        for violation_type, count in sorted(violations_by_type.items(), key=lambda x: x[1], reverse=True):
+            print(f"  {violation_type:20s}: {count:4d} 个")
+    
+    # 按严重度统计
+    violations_by_severity = analysis.get("violations_by_severity", {})
+    if violations_by_severity:
+        print("\n按严重度统计:")
+        for severity in ["high", "medium", "low"]:
+            count = violations_by_severity.get(severity, 0)
+            if count > 0:
+                severity_symbol = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
+                print(f"  {severity_symbol} {severity:10s}: {count:4d} 个")
+    
+    # 按检查类型统计
+    violations_by_check_type = analysis.get("violations_by_check_type", {})
+    if violations_by_check_type:
+        print("\n按检查类型统计:")
+        for check_type, count in sorted(violations_by_check_type.items(), key=lambda x: x[1], reverse=True):
+            print(f"  {check_type:20s}: {count:4d} 个")
+    
+    # 显示过滤后的违规详情
+    if not args.stats_only and analysis.get("filtered_violations", 0) > 0:
+        filtered_violations = analysis.get("filtered_violations_list", [])
+        
+        print(f"\n过滤后违规详情 ({len(filtered_violations)} 个):")
+        print("-" * 40)
+        
+        for i, violation in enumerate(filtered_violations[:20], 1):
+            severity = violation.get("severity", "medium")
+            violation_type = violation.get("type", "unknown")
+            description = violation.get("description", "无描述")
+            source_file = violation.get("file", "unknown")
+            
+            severity_symbol = {
+                "high": "🔴",
+                "medium": "🟡", 
+                "low": "🟢"
+            }.get(severity, "⚪")
+            
+            print(f"{i:3d}. {severity_symbol} [{violation_type:15s}] {description}")
+            if args.verbose:
+                print(f"     文件: {source_file}")
+                if "suggestion" in violation:
+                    print(f"     建议: {violation['suggestion']}")
+        
+        if len(filtered_violations) > 20:
+            print(f"    ... 还有 {len(filtered_violations) - 20} 个违规未显示")
+    
+    # 显示修复建议
+    suggestions = analysis.get("suggestions", [])
+    if suggestions:
+        print(f"\n修复建议 ({len(suggestions)} 条):")
+        print("-" * 40)
+        
+        for i, suggestion in enumerate(suggestions, 1):
+            priority = suggestion.get("priority", "medium")
+            description = suggestion.get("description", "")
+            recommendation = suggestion.get("recommendation", "")
+            
+            priority_symbol = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(priority, "⚪")
+            
+            print(f"{i:2d}. {priority_symbol} {description}")
+            print(f"     {recommendation}")
+    
+    print("\n" + "="*60)
+
+if __name__ == "__main__":
+    sys.exit(main())

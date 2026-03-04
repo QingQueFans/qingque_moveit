@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""
+获取 PlanningScene 信息
+"""
+import sys
+import os
+import argparse
+import json
+
+# ========== 修改这里：添加正确的路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # scripts/
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)               # core_functions/
+SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
+
+# 添加 src 目录到 Python 路径
+sys.path.insert(0, SRC_DIR)
+
+# 现在可以正常导入
+from ps_core.scene_client import PlanningSceneClient
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="获取 PlanningScene 信息",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  %(prog)s                    # 打印场景摘要
+  %(prog)s --json             # 输出JSON格式
+  %(prog)s --objects          # 只列出物体
+  %(prog)s --state            # 只显示机器人状态
+  %(prog)s --full             # 显示完整信息
+        """
+    )
+    
+    parser.add_argument('--json', action='store_true', help='JSON格式输出')
+    parser.add_argument('--objects', '-o', action='store_true', help='只显示碰撞物体')
+    parser.add_argument('--state', '-s', action='store_true', help='只显示机器人状态')
+    parser.add_argument('--full', '-f', action='store_true', help='显示完整信息')
+    parser.add_argument('--components', '-c', type=str, default='',
+                       help='指定获取的组件，用逗号分隔: world,state,acm,attached')
+    
+    args = parser.parse_args()
+    
+    try:
+        # === 修改点：直接实例化，不用单例 ===
+        client = PlanningSceneClient()
+        
+        # 获取场景
+        scene = client.get_current_scene()
+        if not scene:
+            print("无法获取场景", file=sys.stderr)
+            return 1
+        
+        # 检查是否有 get_attached_objects 方法，如果没有，提供兼容实现
+        if not hasattr(client, 'get_attached_objects'):
+            def get_attached_objects():
+                """获取附着物体列表（兼容方法）"""
+                if scene.robot_state and scene.robot_state.attached_collision_objects:
+                    return [att_obj.object.id for att_obj in scene.robot_state.attached_collision_objects]
+                return []
+            client.get_attached_objects = get_attached_objects
+        
+        if args.json:
+            # JSON输出
+            result = {
+                "collision_objects": [],
+                "robot_state": None,
+                "attached_objects": []
+            }
+            
+            # 碰撞物体
+            if scene.world and scene.world.collision_objects:
+                for obj in scene.world.collision_objects:
+                    result["collision_objects"].append({
+                        "id": obj.id,
+                        "operation": obj.operation,
+                        "type": "collision"
+                    })
+            
+            # 机器人状态
+            if scene.robot_state:
+                result["robot_state"] = {
+                    "has_joint_state": scene.robot_state.joint_state is not None
+                }
+                
+                if scene.robot_state.joint_state:
+                    joints = scene.robot_state.joint_state
+                    result["robot_state"]["joints"] = [
+                        {"name": name, "position": float(pos)}
+                        for name, pos in zip(joints.name, joints.position)
+                    ]
+            
+            # 附着物体
+            if scene.robot_state and scene.robot_state.attached_collision_objects:
+                for att_obj in scene.robot_state.attached_collision_objects:
+                    result["attached_objects"].append({
+                        "id": att_obj.object.id,
+                        "link": att_obj.link_name,
+                        "type": "attached"
+                    })
+            
+            print(json.dumps(result, indent=2))
+            
+        elif args.objects:
+            # 只显示物体
+            objects = client.get_collision_objects()
+            attached = client.get_attached_objects()
+            
+            print("碰撞物体:")
+            if objects:
+                for obj in objects:
+                    print(f"  • {obj}")
+            else:
+                print("  (无)")
+            
+            if attached:
+                print("\n附着物体:")
+                for obj in attached:
+                    print(f"  • {obj}")
+            
+        elif args.state:
+        # 只显示机器人状态
+            state = client.get_robot_state()
+            if state and state.joint_state:
+                joints = state.joint_state
+                print(f"机器人状态 ({len(joints.name)} 个关节):")
+                print("-" * 40)
+                for name, pos in zip(joints.name, joints.position):
+                    print(f"{name:20} {pos:8.4f} rad  ({pos*180/3.1416:6.1f}°)")
+            else:
+                print("无机器人状态信息")
+                
+        elif args.full:
+            # 显示完整信息
+            client.print_scene_info()
+            
+            # 额外显示详细信息
+            if scene.world and scene.world.collision_objects:
+                print("\n碰撞物体详细信息:")
+                for obj in scene.world.collision_objects:
+                    print(f"\n  ID: {obj.id}")
+                    print(f"  操作类型: {obj.operation}")
+                    if obj.primitives:
+                        print(f"  形状数量: {len(obj.primitives)}")
+                        for i, prim in enumerate(obj.primitives):
+                            print(f"    形状{i+1}: 类型={prim.type}, 尺寸={prim.dimensions}")
+            
+        else:
+            # 默认：显示摘要
+            print("PlanningScene 摘要")
+            print("=" * 60)
+            
+            # 碰撞物体
+            objects = client.get_collision_objects()
+            print(f"碰撞物体: {len(objects)} 个")
+            if objects:
+                for obj in objects[:5]:  # 最多显示5个
+                    print(f"  • {obj}")
+                if len(objects) > 5:
+                    print(f"  ... 还有 {len(objects)-5} 个物体")
+            
+            # 机器人状态
+            state = client.get_robot_state()
+            if state and state.joint_state:
+                joints = state.joint_state
+                print(f"\n机器人关节: {len(joints.name)} 个")
+                if joints.name:
+                    print(f"  示例: {joints.name[0]} = {joints.position[0]:.4f} rad")
+            else:
+                print("\n机器人状态: 无信息")
+            
+            # ACM
+            if scene.allowed_collision_matrix:
+                print(f"\n允许碰撞矩阵: 有")
+            else:
+                print(f"\n允许碰撞矩阵: 无")
+            
+            print("=" * 60)
+            print("使用 --full 查看完整信息，--json 输出JSON格式")
+        
+        return 0
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断", file=sys.stderr)
+        return 130
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

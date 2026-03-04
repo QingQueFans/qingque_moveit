@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""检查控制器状态"""
+import sys
+import os
+import rclpy
+import subprocess
+
+# ========== 正确的路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+# 找到moveit_ros根目录
+current_dir = os.path.dirname(PROJECT_ROOT)
+while current_dir:
+    dir_name = os.path.basename(current_dir)
+    if dir_name == 'moveit_ros':
+        MOVEIT_ROS_ROOT = current_dir
+        MOVEIT_CORE_ROOT = os.path.join(os.path.dirname(current_dir), 'moveit_core')
+        MOVEIT_PLUGINS_ROOT = os.path.join(os.path.dirname(current_dir), 'moveit_plugins')
+        break
+    current_dir = os.path.dirname(current_dir)
+
+# 设置路径
+TRAJECTORY_EXECUTION_SRC = os.path.join(MODULE_ROOT, 'src')
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+
+sys.path.insert(0, TRAJECTORY_EXECUTION_SRC)
+sys.path.insert(0, PLANNING_SCENE_SRC)
+
+print(f"[控制器状态] 路径设置:")
+print(f"  当前模块: {TRAJECTORY_EXECUTION_SRC}")
+print(f"  规划场景: {PLANNING_SCENE_SRC}")
+
+# ========== 导入检查 ==========
+try:
+    from trajectory_execution import ControllerManager
+    HAS_DEPENDENCIES = True
+    print("✅ 依赖导入成功")
+except ImportError as e:
+    print(f"❌ 导入依赖失败: {e}")
+    HAS_DEPENDENCIES = False
+
+def test_connection():
+    """测试控制器连接"""
+    try:
+        result = subprocess.run(['ros2', 'action', 'list'], 
+                              capture_output=True, text=True, timeout=3.0)
+        if 'follow_joint_trajectory' in result.stdout:
+            return {"success": True, "result": "找到Action服务器"}
+        else:
+            return {"success": False, "error": "未找到Action服务器"}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "ROS命令超时"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def main():
+    if not HAS_DEPENDENCIES:
+        print("❌ 依赖导入失败")
+        return 1
+    
+    try:
+        if not rclpy.ok():
+            rclpy.init()
+        
+        print("🔍 检查控制器状态...")
+        controller = ControllerManager()        # 获取状态
+        status = controller.get_controller_status()
+        
+        print("\n" + "="*60)
+        print("控制器状态")
+        print("="*60)
+        
+        print(f"控制器: {status.get('controller', '未知')}")
+        print(f"状态: {'🟢 已连接' if status.get('connected') else '🔴 未连接'}")
+        print(f"Action服务器: {status.get('action_server', '未知')}")
+        print(f"服务器就绪: {'是' if status.get('server_ready') else '否'}")
+        print(f"来源: {status.get('source', '未知')}")
+        
+        # 检查ROS服务
+        print("\n相关ROS服务:")
+        print("-"*40)
+        
+        try:
+            result = subprocess.run(['ros2', 'service', 'list'], 
+                                  capture_output=True, text=True, timeout=3.0)
+            controller_services = []
+            for line in result.stdout.split('\n'):
+                if 'controller' in line.lower():
+                    controller_services.append(line.strip())
+            
+            if controller_services:
+                for service in controller_services[:5]:
+                    print(f"  {service}")
+                if len(controller_services) > 5:
+                    print(f"  ... 还有 {len(controller_services)-5} 个服务")
+            else:
+                print("  未找到控制器服务")
+        except:
+            print("  无法获取服务列表")
+        
+        # 检查Action服务器
+        print("\n相关Action服务器:")
+        print("-"*40)
+        try:
+            result = subprocess.run(['ros2', 'action', 'list'], 
+                                  capture_output=True, text=True, timeout=3.0)
+            found = False
+            for line in result.stdout.split('\n'):
+                if 'follow_joint_trajectory' in line:
+                    print(f"  {line.strip()}")
+                    found = True
+            
+            if not found:
+                print("  未找到FollowJointTrajectory Action")
+        except:
+            print("  无法获取Action列表")
+        
+        print("="*60)
+        
+        # 测试连接
+        print("\n🔧 测试控制器连接...")
+        test_result = test_connection()
+        if test_result.get("success", False):
+            print("✅ 控制器连接测试通过")
+            print(f"   结果: {test_result.get('result')}")
+        else:
+            print(f"❌ 连接测试失败: {test_result.get('error', '未知错误')}")
+        
+        controller.destroy_node()
+        rclpy.shutdown()
+        
+        return 0 if status.get('connected') else 1
+        
+    except Exception as e:
+        print(f"❌ 检查异常: {e}")
+        try:
+            rclpy.shutdown()
+        except:
+            pass
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

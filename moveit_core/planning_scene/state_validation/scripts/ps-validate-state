@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""
+验证规划场景状态的有效性
+"""
+import sys
+import os
+import argparse
+import json
+import time
+
+# ========== 设置路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
+sys.path.insert(0, CORE_SRC)
+
+DETECTION_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, DETECTION_SRC)
+
+OBJ_MODULE_ROOT = os.path.join(PROJECT_ROOT, 'collision_objects')
+OBJ_SRC = os.path.join(OBJ_MODULE_ROOT, 'src')
+sys.path.insert(0, OBJ_SRC)
+
+from ps_core.scene_client import PlanningSceneClient
+from ps_validation.state_validator import StateValidator
+from ps_objects.object_manager import ObjectManager
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="验证规划场景状态的有效性",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 验证当前场景状态
+  %(prog)s
+  
+  # 验证指定状态文件
+  %(prog)s --state-file state.json
+  
+  # 验证关节状态
+  %(prog)s --joint-state "[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]"
+  
+  # 验证机器人位姿
+  %(prog)s --pose "[0.5, 0.3, 0.2, 0, 0, 0, 1]"
+  
+  # 只检查碰撞和关节限位
+  %(prog)s --check-collision --check-joint-limits
+  
+  # 执行所有检查（默认）
+  %(prog)s --check-all
+  
+  # JSON格式输出
+  %(prog)s --state-file state.json --json
+        """
+    )    # 状态输入选项
+    state_group = parser.add_mutually_exclusive_group()
+    state_group.add_argument('--state-file', '-f', type=str,
+                           help='状态文件路径（JSON格式）')
+    state_group.add_argument('--joint-state', '-j', type=str,
+                           help='关节状态值（JSON数组字符串）')
+    state_group.add_argument('--pose', '-p', type=str,
+                           help='机器人位姿（[x, y, z, qx, qy, qz, qw] JSON数组）')
+    state_group.add_argument('--current', '-c', action='store_true',
+                           help='使用当前场景状态（默认）')
+    
+    # 验证选项
+    parser.add_argument('--check-collision', action='store_true',
+                       help='检查碰撞（包括自碰撞）')
+    parser.add_argument('--check-joint-limits', action='store_true',
+                       help='检查关节限位')
+    parser.add_argument('--check-reachability', action='store_true',
+                       help='检查可达性')
+    parser.add_argument('--check-singularity', action='store_true',
+                       help='检查奇异点')
+    parser.add_argument('--check-constraints', action='store_true',
+                       help='检查约束条件')
+    parser.add_argument('--check-all', '-a', action='store_true',
+                       help='执行所有检查')
+    
+    # 关节限制配置
+    parser.add_argument('--joint-limits-file', type=str,
+                       help='关节限制配置文件（JSON）')
+    
+    # 输出选项
+    parser.add_argument('--json', action='store_true',
+                       help='JSON格式输出')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='详细输出')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='安静模式，只输出结果')
+    
+    args = parser.parse_args()
+    
+    try:
+        # 初始化
+        client = PlanningSceneClient()
+        validator = StateValidator(client)
+        manager = ObjectManager(client)
+        
+        # 确定要执行的检查
+        checks_to_perform = []
+        
+        if args.check_all:
+            checks_to_perform = ['collision', 'joint_limits', 'reachability', 
+                               'singularity', 'constraints']
+        else:
+            if args.check_collision:
+                checks_to_perform.append('collision')
+            if args.check_joint_limits:
+                checks_to_perform.append('joint_limits')
+            if args.check_reachability:
+                checks_to_perform.append('reachability')
+            if args.check_singularity:
+                checks_to_perform.append('singularity')
+            if args.check_constraints:
+                checks_to_perform.append('constraints')
+        
+        # 如果没有指定检查项，使用默认
+        if not checks_to_perform:
+            checks_to_perform = ['collision', 'joint_limits', 'reachability']        # 加载状态数据
+        state_config = {"id": "command_line_state"}
+        
+        if args.state_file:
+            with open(args.state_file, 'r') as f:
+                state_config = json.load(f)
+                
+        elif args.joint_state:
+            try:
+                joint_state = json.loads(args.joint_state)
+                state_config["joint_state"] = joint_state
+                state_config["type"] = "joint_state"
+            except json.JSONDecodeError as e:
+                print(f"错误：无效的关节状态JSON格式: {e}")
+                return 1
+                
+        elif args.pose:
+            try:
+                pose = json.loads(args.pose)
+                if len(pose) == 7:
+                    state_config["position"] = pose[:3]
+                    state_config["orientation"] = pose[3:]
+                    state_config["type"] = "pose"
+                else:
+                    print(f"错误：位姿需要7个值（位置3个，姿态4个），得到 {len(pose)} 个")
+                    return 1
+            except json.JSONDecodeError as e:
+                print(f"错误：无效的位姿JSON格式: {e}")
+                return 1
+        
+        else:
+            # 使用当前场景状态（简化）
+            state_config["type"] = "current_scene"
+            state_config["position"] = [0.0, 0.0, 0.5]  # 默认位置
+        
+        # 加载关节限制
+        if args.joint_limits_file:
+            try:
+                with open(args.joint_limits_file, 'r') as f:
+                    joint_limits = json.load(f)
+                state_config["joint_limits"] = joint_limits
+            except Exception as e:
+                print(f"警告：加载关节限制文件失败: {e}")
+        
+        # 执行验证
+        if not args.quiet:
+            print(f"正在验证状态...")
+            print(f"检查项: {', '.join(checks_to_perform)}")
+        
+        start_time = time.time()
+        results = validator.validate_state(state_config, checks=checks_to_perform)
+        elapsed_time = time.time() - start_time
+        
+        results["validation_time"] = elapsed_time
+           # 输出结果
+        if args.json:
+            print(json.dumps(results, indent=2, default=str))
+        elif not args.quiet:
+            _print_validation_results(results, args.verbose)        # 返回退出代码
+        return 0 if results.get("valid", False) else 1
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+def _print_validation_results(results, verbose=False):
+    """打印验证结果"""
+    print("\n" + "="*60)
+    print("状态验证结果")
+    print("="*60)
+    
+    if "error" in results:
+        print(f"❌ 验证失败: {results['error']}")
+        return
+    
+    state_id = results.get("state_id", "unknown")
+    state_type = results.get("state_type", "unknown")
+    
+    print(f"状态ID: {state_id}")
+    print(f"状态类型: {state_type}")
+    print(f"验证时间: {results.get('validation_time', 0):.3f}s")
+    print(f"时间戳: {results.get('timestamp', '未知')}")
+    
+    if results.get("valid", False):
+        print("\n✅ 状态有效")
+        print(f"验证分数: {results.get('validation_score', 0):.1%}")
+    else:
+        print("\n❌ 状态无效")
+        print(f"违规数量: {len(results.get('violations', []))}")
+        print(f"验证分数: {results.get('validation_score', 0):.1%}")
+    
+    # 显示检查结果摘要
+    print("\n检查结果摘要:")
+    print("-" * 40)
+    
+    checks_performed = results.get("checks_performed", [])
+    for check in checks_performed:
+        check_key = f"{check}_check"
+        if check_key in results:
+            check_result = results[check_key]
+            status = "✅" if check_result.get("valid", False) else "❌"
+            violations = len(check_result.get("violations", []))
+            
+            print(f"{status} {check:15s}: {violations:2d} 个违规")
+    
+    # 显示违规详情
+    violations = results.get("violations", [])
+    if violations:
+        print(f"\n违规详情 ({len(violations)} 个):")
+        print("-" * 40)
+        
+        for i, violation in enumerate(violations[:10], 1):  # 只显示前10个
+            severity = violation.get("severity", "medium")
+            description = violation.get("description", "无描述")
+            
+            severity_symbol = {
+                "high": "🔴",
+                "medium": "🟡", 
+                "low": "🟢"
+            }.get(severity, "⚪")
+            
+            print(f"{i:2d}. {severity_symbol} {description}")
+            
+            if verbose and "suggestion" in violation:
+                print(f"    建议: {violation['suggestion']}")
+        
+        if len(violations) > 10:
+            print(f"    ... 还有 {len(violations) - 10} 个违规未显示")
+    
+    # 显示修复建议
+    suggestions = results.get("suggestions", [])
+    if suggestions:
+        print(f"\n修复建议 ({len(suggestions)} 条):")
+        print("-" * 40)
+        
+        for i, suggestion in enumerate(set(suggestions), 1):
+            print(f"{i:2d}. {suggestion}")
+    
+    print("\n" + "="*60)
+
+if __name__ == "__main__":
+    sys.exit(main())

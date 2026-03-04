@@ -1,0 +1,18 @@
+# moveit_plugins/moveit_controller_manager/config/gripper_controllers.yaml
+# Panda夹爪控制器配置
+
+controllers:
+  panda_hand_controller:
+    type: GripperActionController
+    action_name: "/panda_hand_controller/gripper_cmd"
+    joints: ["panda_finger_joint1", "panda_finger_joint2"]
+    state_topic: "/panda_hand_controller/state"
+    command_topic: "/panda_hand_controller/commands"
+    
+  # 可选：简化的并行夹爪配置
+  parallel_gripper:
+    type: FollowJointTrajectory
+    action_name: "/gripper_controller/follow_joint_trajectory"
+    joints: ["gripper_joint"]
+    state_topic: "/gripper_controller/state"
+    command_topic: "/gripper_controller/commands"

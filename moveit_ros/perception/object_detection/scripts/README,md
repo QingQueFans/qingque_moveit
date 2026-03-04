@@ -1,0 +1,180 @@
+根据你提供的可执行脚本，以下是所有可用的命令：
+
+一、主要检测模式命令
+
+1. 默认混合检测
+
+```bash
+python3 ros-detect-objects
+# 或
+python3 ros-detect-objects --list
+# 或
+python3 ros-detect-objects --hybrid
+```
+
+功能：同时从场景和缓存检测物体，智能去重
+
+2. 纯场景检测
+
+```bash
+python3 ros-detect-objects --scene-only
+```
+
+功能：只从规划场景（MoveIt/Gazebo）检测物体
+
+3. 纯缓存检测
+
+```bash
+python3 ros-detect-objects --cache-only
+```
+
+功能：只从本地缓存文件检测物体
+
+二、辅助命令
+
+4. 获取单个物体信息
+
+```bash
+python3 ros-detect-objects --object <物体ID>
+```
+
+示例：
+
+```bash
+python3 ros-detect-objects --object test_cube
+python3 ros-detect-objects --object box_1
+```
+
+5. 缓存统计信息
+
+```bash
+python3 ros-detect-objects --cache-stats
+```
+
+功能：显示缓存目录、文件数量、大小等统计信息
+
+6. 指定场景ID检测
+
+```bash
+python3 ros-detect-objects --scene-id <场景标识>
+```
+
+示例：
+
+```bash
+python3 ros-detect-objects --scene-id breakfast_table
+python3 ros-detect-objects --scene-id assembly_station
+```
+
+三、输出格式选项
+
+7. JSON格式输出
+
+```bash
+python3 ros-detect-objects --json
+```
+
+功能：以JSON格式输出结果，方便其他程序解析
+
+8. 详细输出
+
+```bash
+python3 ros-detect-objects --verbose
+# 或
+python3 ros-detect-objects -v
+```
+
+功能：显示更详细的信息（物体尺寸、方向、置信度等）
+
+四、组合使用示例
+
+9. 缓存检测+详细输出
+
+```bash
+python3 ros-detect-objects --cache-only --verbose
+```
+
+输出：显示缓存物体的完整详细信息
+
+10. 获取单个物体+JSON格式
+
+```bash
+python3 ros-detect-objects --object test_cube --json
+```
+
+输出：以JSON格式返回单个物体的完整信息
+
+11. 混合检测+详细+JSON
+
+```bash
+python3 ros-detect-objects --hybrid --verbose --json
+```
+
+输出：详细JSON格式的混合检测结果
+
+12. 带场景ID的缓存统计
+
+```bash
+python3 ros-detect-objects --cache-stats --scene-id workspace_1
+```
+
+五、完整命令列表总结
+
+命令参数 缩写 功能描述 常用组合
+--list 无 列出所有物体（默认混合模式） --list --verbose
+--hybrid 无 混合检测（场景+缓存） --hybrid --json
+--scene-only 无 只检测场景物体 --scene-only -v
+--cache-only 无 只检测缓存物体 --cache-only --verbose
+--object <ID> 无 获取指定物体 --object cube_1 --json
+--cache-stats 无 显示缓存统计 --cache-stats --verbose
+--json 无 JSON格式输出 可与其他所有参数组合
+--verbose -v 详细输出模式 可与其他所有参数组合
+--scene-id <ID> 无 指定场景ID 与检测模式配合使用
+
+六、使用场景示例
+
+快速检查工作空间
+
+```bash
+# 看看当前场景有什么物体
+python3 ros-detect-objects --scene-only
+
+# 看看缓存里保存了什么场景
+python3 ros-detect-objects --cache-only
+
+# 综合查看（推荐日常使用）
+python3 ros-detect-objects --hybrid --verbose
+```
+
+开发调试
+
+```bash
+# 检查缓存系统是否正常
+python3 ros-detect-objects --cache-stats
+
+# 获取特定物体用于抓取规划
+python3 ros-detect-objects --object red_cup --json
+
+# 测试不同场景配置
+python3 ros-detect-objects --scene-id demo1 --cache-only
+```
+
+系统集成
+
+```bash
+# 提供JSON数据给其他ROS节点
+python3 ros-detect-objects --hybrid --json > /tmp/objects.json
+
+# 快速验证缓存完整性
+python3 ros-detect-objects --cache-only --verbose | grep "物体数量"
+```
+
+七、帮助信息
+
+查看完整使用说明：
+
+```bash
+python3 ros-detect-objects --help
+```
+
+注意：--scene-only 需要规划场景服务正常运行，--cache-only 需要已有缓存文件。

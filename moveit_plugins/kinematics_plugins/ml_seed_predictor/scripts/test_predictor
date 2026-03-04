@@ -1,0 +1,23 @@
+#!/bin/bash
+"""
+测试预测器脚本
+"""
+cd "$(dirname "$0")/.."
+python3 -c "
+from src.ml_seed_predictor import MLSeedPredictor
+import numpy as np
+
+predictor = MLSeedPredictor()
+stats = predictor.get_stats()
+print(f'📊 当前状态:')
+print(f'  样本数: {stats[\"samples\"]}')
+print(f'  模型已训练: {stats[\"model_trained\"]}')
+print(f'  模型类型: {stats[\"model_type\"]}')
+
+if stats[\"model_trained\"]:
+    # 测试预测
+    test_pose = [0.4, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0]
+    prediction = predictor.predict(test_pose)
+    if prediction is not None:
+        print(f'🎯 预测种子: {[round(p,3) for p in prediction[:3]]}...')
+"

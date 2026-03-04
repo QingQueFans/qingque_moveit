@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+"""
+检查状态是否满足约束条件
+"""
+import sys
+import os
+import argparse
+import json
+import time
+
+# ========== 设置路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
+sys.path.insert(0, CORE_SRC)
+
+DETECTION_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, DETECTION_SRC)
+
+OBJ_MODULE_ROOT = os.path.join(PROJECT_ROOT, 'collision_objects')
+OBJ_SRC = os.path.join(OBJ_MODULE_ROOT, 'src')
+sys.path.insert(0, OBJ_SRC)
+
+from ps_core.scene_client import PlanningSceneClient
+from ps_validation.constraint_checker import ConstraintChecker
+from ps_objects.object_manager import ObjectManager
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="检查状态是否满足约束条件",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 检查当前状态是否满足约束
+  %(prog)s --constraints constraints.json
+  
+  # 检查指定状态文件的约束
+  %(prog)s --state-file state.json --constraints constraints.json
+  
+  # 检查关节约束
+  %(prog)s --joint-state "[0,0,0,0,0,0]" --joint-constraint "[0.1,0,0,0,0,0]" --tolerance 0.05
+  
+  # 检查位置约束
+  %(prog)s --position "[0.5,0,0.5]" --target-position "[0.5,0,0.5]" --tolerance 0.01
+  
+  # 检查距离约束
+  %(prog)s --distance-constraint "robot" "obstacle1" --min-distance 0.1 --max-distance 0.5
+  
+  # JSON格式输出
+  %(prog)s --constraints constraints.json --json
+        """
+    )
+    
+    # 状态输入选项
+    state_group = parser.add_mutually_exclusive_group()
+    state_group.add_argument('--state-file', '-s', type=str,
+                           help='状态文件路径（JSON格式）')
+    state_group.add_argument('--joint-state', '-j', type=str,
+                           help='关节状态值（JSON数组字符串）')
+    state_group.add_argument('--position', '-p', type=str,
+                           help='位置（[x, y, z] JSON数组）')
+    state_group.add_argument('--current', '-c', action='store_true',
+                           help='使用当前场景状态（默认）')
+    
+    # 约束输入选项
+    constraint_group = parser.add_mutually_exclusive_group()
+    constraint_group.add_argument('--constraints', '-C', type=str,
+                                help='约束文件路径（JSON格式）')
+    constraint_group.add_argument('--joint-constraint', type=str,
+                                help='关节约束目标值（JSON数组）')
+    constraint_group.add_argument('--position-constraint', type=str,
+                                help='位置约束目标值（[x, y, z] JSON数组）')
+    constraint_group.add_argument('--distance-constraint', nargs=2, type=str,
+                                help='距离约束：物体1 物体2')
+    
+    # 约束参数
+    parser.add_argument('--tolerance', '-t', type=float, default=0.01,
+                       help='约束容差（默认: 0.01）')
+    parser.add_argument('--min-distance', type=float, default=0.0,
+                       help='最小距离（用于距离约束）')
+    parser.add_argument('--max-distance', type=float, default=float('inf'),
+                       help='最大距离（用于距离约束）')
+    parser.add_argument('--severity', choices=['high', 'medium', 'low'], 
+                       default='medium', help='约束严重程度')
+    
+    # 输出选项
+    parser.add_argument('--json', action='store_true',
+                       help='JSON格式输出')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='详细输出')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='安静模式')
+    
+    args = parser.parse_args()
+    
+    # 参数验证
+    if not args.constraints and not args.joint_constraint and not args.position_constraint and not args.distance_constraint:
+        print("错误：必须指定至少一种约束条件")
+        parser.print_help()
+        return 1
+    
+    try:
+        # 初始化
+        client = PlanningSceneClient()
+        checker = ConstraintChecker(client)        # 加载状态数据
+        state_config = {"id": "command_line_state"}
+        
+        if args.state_file:
+            with open(args.state_file, 'r') as f:
+                state_config = json.load(f)
+                
+        elif args.joint_state:
+            try:
+                joint_state = json.loads(args.joint_state)
+                state_config["joint_state"] = joint_state
+                state_config["type"] = "joint_state"
+            except json.JSONDecodeError as e:
+                print(f"错误：无效的关节状态JSON格式: {e}")
+                return 1
+                
+        elif args.position:
+            try:
+                position = json.loads(args.position)
+                if len(position) == 3:
+                    state_config["position"] = position
+                    state_config["type"] = "position"
+                else:
+                    print(f"错误：位置需要3个值，得到 {len(position)} 个")
+                    return 1
+            except json.JSONDecodeError as e:
+                print(f"错误：无效的位置JSON格式: {e}")
+                return 1
+        
+        else:
+            # 使用当前场景状态
+            state_config["type"] = "current_scene"
+            state_config["position"] = [0.0, 0.0, 0.5]
+        
+        # 构建约束列表
+        constraints = []
+        
+        if args.constraints:
+            constraints = checker.load_constraints_from_file(args.constraints)
+            
+        elif args.joint_constraint:
+            try:
+                target_joints = json.loads(args.joint_constraint)
+                constraint = {
+                    "type": "joint_constraint",
+                    "target_joints": target_joints,
+                    "tolerance": args.tolerance,
+                    "severity": args.severity,
+                    "description": f"关节约束: 目标 {target_joints}, 容差 {args.tolerance}"
+                }
+                constraints.append(constraint)
+            except json.JSONDecodeError as e:
+                print(f"错误：无效的关节约束JSON格式: {e}")
+                return 1
+                
+        elif args.position_constraint:
+            try:
+                target_position = json.loads(args.position_constraint)
+                constraint = {
+                    "type": "position_constraint",
+                    "target_position": target_position,
+                    "tolerance": args.tolerance,
+                    "severity": args.severity,
+                    "description": f"位置约束: 目标 {target_position}, 容差 {args.tolerance}"
+                }
+                constraints.append(constraint)
+            except json.JSONDecodeError as e:
+                print(f"错误：无效的位置约束JSON格式: {e}")
+                return 1
+                
+        elif args.distance_constraint:
+            constraint = {
+                "type": "distance_constraint",
+                "object1": args.distance_constraint[0],
+                "object2": args.distance_constraint[1],
+                "min_distance": args.min_distance,
+                "max_distance": args.max_distance,
+                "severity": args.severity,
+                "description": f"距离约束: {args.distance_constraint[0]} ↔ {args.distance_constraint[1]}, 范围 [{args.min_distance}, {args.max_distance}]"
+            }
+            constraints.append(constraint)        # 执行约束检查
+        if not args.quiet:
+            print(f"正在检查 {len(constraints)} 个约束条件...")
+        
+        start_time = time.time()
+        results = checker.check_constraints(state_config, constraints)
+        elapsed_time = time.time() - start_time
+        
+        results["check_time"] = elapsed_time
+        
+        # 输出结果
+        if args.json:
+            print(json.dumps(results, indent=2, default=str))
+        elif not args.quiet:
+            _print_constraint_results(results, args.verbose)
+        
+        # 返回退出代码
+        return 0 if results.get("satisfied", False) else 1
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+def _print_constraint_results(results, verbose=False):
+    """打印约束检查结果"""
+    print("\n" + "="*60)
+    print("约束检查结果")
+    print("="*60)
+    
+    if "error" in results:
+        print(f"❌ 检查失败: {results['error']}")
+        return
+    
+    state_id = results.get("state_id", "unknown")
+    total_constraints = results.get("total_constraints", 0)
+    satisfied_constraints = results.get("satisfied_constraints", 0)
+    violated_constraints = results.get("violated_constraints", 0)
+    
+    print(f"状态ID: {state_id}")
+    print(f"检查时间: {results.get('check_time', 0):.3f}s")
+    print(f"时间戳: {results.get('timestamp', '未知')}")
+    print(f"\n约束统计:")
+    print(f"  总数: {total_constraints}")
+    print(f"  满足: {satisfied_constraints}")
+    print(f"  违反: {violated_constraints}")
+    
+    if results.get("satisfied", False):
+        print("\n✅ 所有约束条件满足")
+    else:
+        print("\n❌ 有约束条件未满足")
+    
+    # 显示约束详情
+    constraint_details = results.get("constraint_details", [])
+    if constraint_details:
+        print(f"\n约束详情:")
+        print("-" * 40)
+        
+        for i, detail in enumerate(constraint_details, 1):
+            constraint_type = detail.get("constraint_type", "unknown")
+            satisfied = detail.get("satisfied", False)
+            status = "✅" if satisfied else "❌"
+            
+            print(f"{i:2d}. {status} {constraint_type:20s}", end="")
+            
+            if "distance" in detail:
+                print(f" 距离: {detail['distance']:.3f}", end="")
+            if "angle_difference" in detail:
+                print(f" 角度差: {detail['angle_difference']:.3f}", end="")
+            if "max_violation" in detail:
+                print(f" 最大违规: {detail['max_violation']:.3f}", end="")
+            
+            print()
+            
+            if verbose and not satisfied and "violations" in detail:
+                for violation in detail["violations"]:
+                    print(f"     {violation.get('description', '')}")
+    
+    # 显示违规详情
+    violations = results.get("violations", [])
+    if violations:
+        print(f"\n违规详情 ({len(violations)} 个):")
+        print("-" * 40)
+        
+        for i, violation in enumerate(violations[:10], 1):
+            severity = violation.get("severity", "medium")
+            description = violation.get("description", "无描述")
+            
+            severity_symbol = {
+                "high": "🔴",
+                "medium": "🟡", 
+                "low": "🟢"
+            }.get(severity, "⚪")
+            
+            print(f"{i:2d}. {severity_symbol} {description}")
+            
+            if verbose and "suggestion" in violation:
+                print(f"    建议: {violation['suggestion']}")
+    
+    print("\n" + "="*60)
+
+if __name__ == "__main__":
+    sys.exit(main())

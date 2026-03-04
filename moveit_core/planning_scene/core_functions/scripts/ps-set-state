@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""
+设置机器人状态
+"""
+import sys
+import os
+import argparse
+import json
+
+# ========== 修改这里：添加正确的路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # scripts/
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)               # core_functions/
+SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
+
+# 添加 src 目录到 Python 路径
+sys.path.insert(0, SRC_DIR)
+
+# 现在可以正常导入
+from ps_core.scene_client import PlanningSceneClient
+from sensor_msgs.msg import JointState
+from moveit_msgs.msg import RobotState
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="设置机器人状态",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 从关节值设置状态
+  %(prog)s --joints "0,0,0,0,0,0,0"
+  
+  # 设置单个关节
+  %(prog)s --joint panda_joint1=1.0 --joint panda_joint2=0.5
+  
+  # 从文件加载状态
+  %(prog)s --file robot_state.json
+  
+  # 重置到零位
+  %(prog)s --zero
+        """
+    )
+    
+    parser.add_argument('--joints', '-j', type=str,
+                       help='关节值，逗号分隔，如 "0,0.5,0,1.2"')
+    parser.add_argument('--joint', '-J', action='append',
+                       help='单个关节设置，格式：关节名=值，可多次使用')
+    parser.add_argument('--zero', '-z', action='store_true',
+                       help='设置所有关节为零')
+    parser.add_argument('--file', '-f', type=str,
+                       help='从JSON文件加载状态')
+    parser.add_argument('--dry-run', '-d', action='store_true',
+                       help='只显示将要设置的状态，不实际应用')
+    parser.add_argument('--confirm', '-c', action='store_true',
+                       help='设置前需要确认')
+    
+    args = parser.parse_args()
+    
+    try:
+        # === 修改点：直接实例化，不用单例 ===
+        client = PlanningSceneClient()
+        
+        # 检查是否有 set_current_state 方法，如果没有则添加兼容实现
+        if not hasattr(client, 'set_current_state'):
+            print("警告: PlanningSceneClient 没有 set_current_state 方法")
+            print("将使用 apply_scene_update 替代")
+            
+            def set_current_state(self, robot_state):
+                """设置机器人状态（兼容方法）"""
+                scene = self.get_current_scene()
+                if not scene:
+                    return False
+                scene.robot_state = robot_state
+                return self.apply_scene_update(scene)
+            
+            # 动态添加方法
+            client.set_current_state = lambda rs: set_current_state(client, rs)
+        
+        # 创建机器人状态
+        robot_state = RobotState()
+        joint_state = JointState()
+        
+        # 确定关节名称（这里简化处理，实际应从机器人模型获取）
+        # 假设是Panda机器人
+        default_joint_names = [
+            "panda_joint1", "panda_joint2", "panda_joint3",
+            "panda_joint4", "panda_joint5", "panda_joint6",
+            "panda_joint7"
+        ]
+        
+        if args.zero:
+            # 设置所有关节为零
+            joint_state.name = default_joint_names
+            joint_state.position = [0.0] * len(default_joint_names)
+            print(f"将设置所有 {len(default_joint_names)} 个关节为零")
+            
+        elif args.joints:
+            # 从逗号分隔的关节值设置
+            joint_values = [float(x.strip()) for x in args.joints.split(',')]
+            joint_state.name = default_joint_names[:len(joint_values)]
+            joint_state.position = joint_values
+            print(f"设置 {len(joint_values)} 个关节: {joint_values}")
+            
+        elif args.joint:
+            # 从单个关节设置
+            joint_dict = {}
+            for j in args.joint:
+                if '=' in j:
+                    name, value = j.split('=', 1)
+                    joint_dict[name.strip()] = float(value.strip())
+            
+            # 使用默认关节名，设置指定值，其余为0
+            joint_state.name = default_joint_names
+            joint_state.position = [
+                joint_dict.get(name, 0.0) for name in default_joint_names
+            ]
+            
+            print(f"设置关节:")
+            for name, value in joint_dict.items():
+                print(f"  {name} = {value}")
+                
+        elif args.file:
+            # 从文件加载（简化实现）
+            print(f"⚠️  从文件加载功能待实现: {args.file}")
+            return 1
+            
+        else:
+            # 交互式输入
+            print("当前未指定状态设置方式")
+            print("可用选项:")
+            print("  --joints VALUE    设置所有关节值")
+            print("  --joint NAME=VALUE 设置单个关节")
+            print("  --zero            设置所有关节为零")
+            print("  --file FILE       从文件加载")
+            return 0        
+        # 设置到消息中
+        robot_state.joint_state = joint_state
+        
+        # 显示将要设置的状态
+        print("\n将要设置的关节状态:")
+        print("-" * 40)
+        for name, pos in zip(joint_state.name, joint_state.position):
+            print(f"{name:20} {pos:8.4f} rad")
+        print("-" * 40)
+        
+        if args.dry_run:
+            print("⏸️  干运行模式，未实际设置状态")
+            return 0
+        
+        if args.confirm:
+            confirm = input("\n确认设置？(y/N): ")
+            if confirm.lower() != 'y':
+                print("取消操作")
+                return 0
+        
+        # 实际设置
+        print("正在设置机器人状态...")
+        success = client.set_current_state(robot_state)
+        
+        if success:
+            print("✅ 机器人状态设置成功")
+            
+            # 验证设置
+            print("\n验证设置结果:")
+            current_state = client.get_robot_state()
+            if current_state and current_state.joint_state:
+                current_joints = current_state.joint_state
+                for target_name, target_pos in zip(joint_state.name, joint_state.position):
+                    # 查找对应关节
+                    found = False
+                    for current_name, current_pos in zip(current_joints.name, current_joints.position):
+                        if current_name == target_name:
+                            diff = abs(current_pos - target_pos)
+                            status = "✅" if diff < 0.01 else "⚠️ "
+                            print(f"{status} {target_name}: 目标={target_pos:.4f}, 当前={current_pos:.4f}, 误差={diff:.4f}")
+                            found = True
+                            break
+                    if not found:
+                        print(f"❌ {target_name}: 未找到当前值")
+            return 0
+        else:
+            print("❌ 设置机器人状态失败")
+            return 1
+            
+    except KeyboardInterrupt:
+        print("\n操作被中断", file=sys.stderr)
+        return 130
+    except ValueError as e:
+        print(f"数值错误: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""
+kin-ik: 基本逆运动学求解脚本
+"""
+import sys
+import os
+import argparse
+import json
+import time
+import numpy as np
+import random
+import math
+import statistics
+# ========== 路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+# 计算 moveit_core 的根目录
+MOVEIT_CORE_ROOT = os.path.dirname(PROJECT_ROOT)  # 向上两级到 moveit_core
+print(f"MOVEIT_CORE_ROOT: {MOVEIT_CORE_ROOT}")
+
+# 正确设置 ps_core 的路径
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+IK_SRC = os.path.join(MODULE_ROOT, 'src')
+
+# 添加路径（注意顺序）
+sys.path.insert(0, IK_SRC)           # 1. 先添加逆运动学
+sys.path.insert(0, PLANNING_SCENE_SRC)  # 2. 添加规划场景
+
+try:
+    # 现在应该能正确导入了
+    from ps_core.scene_client import PlanningSceneClient
+    from kin_ik import IKSolver, IKConstraintHandler,IKOptimizer
+    HAS_DEPENDENCIES = True
+    print("✓ 成功导入所有依赖")
+except ImportError as e:
+    print(f"[警告] 导入依赖失败: {e}")
+    import traceback
+    traceback.print_exc()  # 打印完整的堆栈跟踪
+    HAS_DEPENDENCIES = False
+
+def generate_test_poses(num_poses=10):
+    """生成测试位姿"""
+    import random
+    import math
+    
+    poses = []
+    for _ in range(num_poses):
+        # 随机位置
+        x = random.uniform(0.2, 0.8)
+        y = random.uniform(-0.4, 0.4)
+        z = random.uniform(0.1, 0.5)
+        
+        # 随机姿态
+        # 简单的四元数生成（绕z轴旋转）
+        angle = random.uniform(-math.pi, math.pi)
+        qx, qy, qz, qw = 0, 0, math.sin(angle/2), math.cos(angle/2)
+        
+        poses.append([x, y, z, qx, qy, qz, qw])
+    
+    return poses
+
+def benchmark_basic_ik(ik_solver, poses, iterations=1):
+    """基础IK性能测试"""
+    results = []
+    
+    for pose in poses:
+        pose_results = []
+        
+        for i in range(iterations):
+            start_time = time.time()
+            result = ik_solver.solve(pose)
+            elapsed = time.time() - start_time
+            
+            pose_results.append({
+                "success": result["success"],
+                "elapsed_time": elapsed,
+                "iterations": result.get("iterations", 0),
+                "error": result.get("error", float('inf')),
+                "quality": result.get("quality", 0.0)
+            })
+        
+        # 统计该位姿的结果
+        successful = [r for r in pose_results if r["success"]]
+        
+        pose_stats = {
+            "pose": pose,
+            "total_runs": iterations,
+            "successful_runs": len(successful),
+            "success_rate": len(successful) / iterations,
+            
+            "avg_time": statistics.mean([r["elapsed_time"] for r in successful]) if successful else 0,
+            "min_time": min([r["elapsed_time"] for r in successful]) if successful else 0,
+            "max_time": max([r["elapsed_time"] for r in successful]) if successful else 0,
+            
+            "avg_iterations": statistics.mean([r["iterations"] for r in successful]) if successful else 0,
+            "avg_error": statistics.mean([r["error"] for r in successful]) if successful else float('inf'),
+            "avg_quality": statistics.mean([r["quality"] for r in successful]) if successful else 0.0
+        }
+        
+        results.append(pose_stats)
+    
+    return results
+
+def benchmark_with_constraints(ik_solver, poses, iterations=1):
+    """带约束的IK性能测试"""
+    # 添加约束处理器
+    constraint_handler = IKConstraintHandler()
+    constraint_handler.add_orientation_constraint("horizontal")
+    constraint_handler.add_joint_constraint(2, -2.0, -0.5)  # 关节3限制
+    
+    ik_solver.set_constraint_handler(constraint_handler)
+    
+    results = []
+    for pose in poses:
+        pose_results = []
+        
+        for i in range(iterations):
+            start_time = time.time()
+            result = ik_solver.solve_with_constraints(pose)
+            elapsed = time.time() - start_time
+            
+            pose_results.append({
+                "success": result["success"],
+                "constraints_satisfied": result.get("constraints_satisfied", False),
+                "elapsed_time": elapsed,
+                "iterations": result.get("iterations", 0),
+                "error": result.get("error", float('inf'))
+            })
+        
+        successful = [r for r in pose_results if r["success"] and r["constraints_satisfied"]]
+        
+        pose_stats = {
+            "pose": pose,
+            "total_runs": iterations,
+            "successful_runs": len(successful),
+            "success_rate": len(successful) / iterations,
+            
+            "avg_time": statistics.mean([r["elapsed_time"] for r in successful]) if successful else 0,
+            "min_time": min([r["elapsed_time"] for r in successful]) if successful else 0,
+            "max_time": max([r["elapsed_time"] for r in successful]) if successful else 0,
+            
+            "avg_iterations": statistics.mean([r["iterations"] for r in successful]) if successful else 0,
+            "avg_error": statistics.mean([r["error"] for r in successful]) if successful else float('inf')
+        }
+        
+        results.append(pose_stats)
+    
+    return results
+
+def benchmark_optimization(ik_solver, poses, iterations=1):
+    """优化IK性能测试"""
+    optimizer = IKOptimizer()
+    ik_solver.set_optimizer(optimizer)
+    
+    results = []
+    for pose in poses:
+        pose_results = []
+        
+        for i in range(iterations):
+            # 先求基本解
+            base_result = ik_solver.solve(pose)
+            if not base_result["success"]:
+                pose_results.append({"success": False})
+                continue
+            
+            # 再优化
+            start_time = time.time()
+            result = ik_solver.solve_optimized(pose, base_result["solution"])
+            elapsed = time.time() - start_time
+            
+            pose_results.append({
+                "success": result["success"],
+                "optimized": True,
+                "elapsed_time": elapsed,
+                "improvement": result.get("improvement", 0),
+                "initial_score": result.get("initial_score", 0),
+                "final_score": result.get("final_score", 0)
+            })
+        
+        successful = [r for r in pose_results if r["success"]]
+        
+        pose_stats = {
+            "pose": pose,
+            "total_runs": iterations,
+            "successful_runs": len(successful),
+            "success_rate": len(successful) / iterations,
+            
+            "avg_time": statistics.mean([r["elapsed_time"] for r in successful]) if successful else 0,
+            "min_time": min([r["elapsed_time"] for r in successful]) if successful else 0,
+            "max_time": max([r["elapsed_time"] for r in successful]) if successful else 0,
+            
+            "avg_improvement": statistics.mean([r["improvement"] for r in successful]) if successful else 0,
+            "avg_initial_score": statistics.mean([r["initial_score"] for r in successful]) if successful else 0,
+            "avg_final_score": statistics.mean([r["final_score"] for r in successful]) if successful else 0
+        }
+        
+        results.append(pose_stats)
+    
+    return results
+
+def print_benchmark_results(results, benchmark_type, detailed=False):
+    """打印性能测试结果"""
+    print(f"\n{'='*60}")
+    print(f" {benchmark_type} 性能测试结果")
+    print(f"{'='*60}")
+    
+    total_runs = sum(r["total_runs"] for r in results)
+    total_success = sum(r["successful_runs"] for r in results)
+    overall_success_rate = total_success / total_runs if total_runs > 0 else 0
+    
+    # 提取所有成功运行的时间
+    all_times = []
+    all_errors = []
+    all_iterations = []
+    
+    for r in results:
+        if r["successful_runs"] > 0:
+            # 每个位姿的成功率都会影响平均值，这里简化处理
+            pass
+            # 计算统计信息
+    avg_success_rate = statistics.mean([r["success_rate"] for r in results])
+    avg_time = statistics.mean([r["avg_time"] for r in results if r["successful_runs"] > 0])
+    avg_error = statistics.mean([r["avg_error"] for r in results if r["successful_runs"] > 0])
+    
+    print(f"测试总结:")
+    print(f"  测试位姿数: {len(results)}")
+    print(f"  总运行次数: {total_runs}")
+    print(f"  总成功次数: {total_success}")
+    print(f"  总体成功率: {overall_success_rate*100:.1f}%")
+    print(f"  平均成功率: {avg_success_rate*100:.1f}%")
+    print(f"  平均求解时间: {avg_time*1000:.1f}ms")
+    
+    if "avg_error" in results[0]:
+        print(f"  平均误差: {avg_error:.6f}")
+    
+    if "avg_iterations" in results[0]:
+        avg_iter = statistics.mean([r["avg_iterations"] for r in results if r["successful_runs"] > 0])
+        print(f"  平均迭代次数: {avg_iter:.1f}")
+    
+    if detailed:
+        print(f"\n详细结果:")
+        for i, r in enumerate(results):
+            print(f"\n  位姿 {i+1}: {r['pose'][:3]}...")
+            print(f"    成功率: {r['success_rate']*100:.1f}%")
+            print(f"    平均时间: {r['avg_time']*1000:.1f}ms")
+            
+            if "avg_error" in r:
+                print(f"    平均误差: {r['avg_error']:.6f}")
+            if "avg_iterations" in r:
+                print(f"    平均迭代: {r['avg_iterations']:.1f}")
+    
+    return {
+        "benchmark_type": benchmark_type,
+        "overall_success_rate": overall_success_rate,
+        "avg_success_rate": avg_success_rate,
+        "avg_time_ms": avg_time * 1000,
+        "avg_error": avg_error if "avg_error" in results[0] else None,
+        "test_count": len(results),
+        "pose_results": results
+    }
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='逆运动学性能测试',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+测试模式:
+  --basic         基本IK求解测试
+  --constrained   带约束IK求解测试
+  --optimization  IK优化测试
+  --all           全部测试
+
+示例:
+  kin-ik-benchmark --basic --poses 20 --iterations 5
+  kin-ik-benchmark --all --json --verbose
+  kin-ik-benchmark --constrained --poses 10 --iterations 3
+        '''
+    )
+    
+    # 测试模式
+    parser.add_argument('--basic', action='store_true',
+                       help='基本IK求解测试')
+    parser.add_argument('--constrained', action='store_true',
+                       help='带约束IK求解测试')
+    parser.add_argument('--optimization', action='store_true',
+                       help='IK优化测试')
+    parser.add_argument('--all', action='store_true',
+                       help='运行全部测试')
+    
+    # 测试参数
+    parser.add_argument('--poses', type=int, default=10,
+                       help='测试位姿数量 (默认: 10)')
+    parser.add_argument('--iterations', type=int, default=3,
+                       help='每个位姿重复次数 (默认: 3)')
+    parser.add_argument('--pose-file', type=str,
+                       help='使用文件中的位姿，而非随机生成')
+    
+    # 输出选项
+    parser.add_argument('--json', action='store_true',
+                       help='JSON输出格式')
+    parser.add_argument('--verbose', '-v', action='count', default=0,
+                       help='详细输出级别')
+    parser.add_argument('--output', type=str,
+                       help='输出文件路径')
+    
+    args = parser.parse_args()
+    
+    try:
+        # 确定测试模式
+        if args.all:
+            test_modes = ['basic', 'constrained', 'optimization']
+        else:
+            test_modes = []
+            if args.basic: test_modes.append('basic')
+            if args.constrained: test_modes.append('constrained')
+            if args.optimization: test_modes.append('optimization')
+        
+        if not test_modes:
+            print("错误: 必须指定至少一个测试模式")
+            return 1
+        
+        # 初始化
+        client = PlanningSceneClient() if HAS_DEPENDENCIES else None
+        
+        # 生成或加载测试位姿
+        if args.pose_file:
+            with open(args.pose_file, 'r') as f:
+                data = json.load(f)
+            test_poses = data.get("poses", data.get("test_poses", []))
+            if not test_poses:
+                print("错误: 文件中未找到位姿数据")
+                return 1
+        else:
+            test_poses = generate_test_poses(args.poses)
+        
+        print(f"性能测试开始")
+        print(f"测试模式: {', '.join(test_modes)}")
+        print(f"测试位姿: {len(test_poses)} 个")
+        print(f"重复次数: {args.iterations} 次/位姿")
+        print(f"时间戳: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # 执行测试
+        all_results = {}
+        
+        for mode in test_modes:
+            print(f"\n{'='*60}")
+            print(f"执行 {mode} 测试...")
+            
+            ik_solver = IKSolver(client)
+            
+            if mode == 'basic':
+                results = benchmark_basic_ik(ik_solver, test_poses, args.iterations)
+            elif mode == 'constrained':
+                results = benchmark_with_constraints(ik_solver, test_poses, args.iterations)
+            elif mode == 'optimization':
+                results = benchmark_optimization(ik_solver, test_poses, args.iterations)
+            else:
+                continue
+            
+            summary = print_benchmark_results(results, mode, args.verbose >= 1)
+            all_results[mode] = summary
+        
+        # 汇总结果
+        print(f"\n{'='*60}")
+        print("性能测试汇总")
+        print(f"{'='*60}")
+        
+        for mode, summary in all_results.items():
+            print(f"\n{mode}:")
+            print(f"  成功率: {summary['overall_success_rate']*100:.1f}%")
+            print(f"  平均时间: {summary['avg_time_ms']:.1f}ms")
+            if summary['avg_error'] is not None:
+                print(f"  平均误差: {summary['avg_error']:.6f}")
+        
+        # 生成输出
+        output_data = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "test_modes": test_modes,
+            "pose_count": len(test_poses),
+            "iterations_per_pose": args.iterations,
+            "total_runs": len(test_poses) * args.iterations * len(test_modes),
+            "results": all_results,
+            "test_poses": test_poses
+        }
+        
+        if args.json:
+            print("\n" + json.dumps(output_data, indent=2, default=str))
+        
+        if args.output:
+            with open(args.output, 'w') as f:
+                json.dump(output_data, f, indent=2, default=str)
+            print(f"\n结果已保存到: {args.output}")
+        
+        # 计算总体成功率
+        total_success = sum(s['overall_success_rate'] for s in all_results.values())
+        avg_success = total_success / len(all_results) if all_results else 0
+        
+        return 0 if avg_success > 0.5 else 1  # 成功率超过50%视为通过
+        
+    except KeyboardInterrupt:
+        print("\n测试被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

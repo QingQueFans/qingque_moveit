@@ -1,0 +1,404 @@
+#!/usr/bin/env python3
+"""
+ros-control-gripper: 夹爪控制脚本
+"""
+
+import sys
+import os
+import json
+import argparse
+import time
+
+# ========== 路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)  # grasp_execution/
+GRASPING_ROOT = os.path.dirname(MODULE_ROOT)  # grasping/
+PROJECT_ROOT = os.path.dirname(GRASPING_ROOT)  # moveit_ros/
+MOVEIT_ROOT = os.path.dirname(PROJECT_ROOT)  # qingfu_moveit/
+MOVEIT_CORE_ROOT = os.path.join(MOVEIT_ROOT, 'moveit_core')
+
+print(f"[路径] 脚本目录: {SCRIPT_DIR}")
+print(f"[路径] 模块根目录: {MODULE_ROOT}")
+print(f"[路径] 抓取根目录: {GRASPING_ROOT}")
+print(f"[路径] ROS根目录: {PROJECT_ROOT}")
+print(f"[路径] 项目根目录: {MOVEIT_ROOT}")
+
+# 1. 首先添加当前模块路径
+GRASPING_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, GRASPING_SRC)
+
+# 2. 按照感知模块的路径模式添加
+# 感知模块路径应该是：moveit_ros/perception/object_detection/src
+PERCEPTION_MODULE = os.path.join(PROJECT_ROOT, 'perception', 'object_detection')
+PERCEPTION_SRC = os.path.join(PERCEPTION_MODULE, 'src')
+
+print(f"[路径] 感知模块目录: {PERCEPTION_MODULE}")
+print(f"[路径] 感知源码目录: {PERCEPTION_SRC}")
+print(f"[路径] 目录存在: {os.path.exists(PERCEPTION_SRC)}")
+
+if os.path.exists(PERCEPTION_SRC):
+    sys.path.insert(0, PERCEPTION_SRC)
+    
+    # 列出目录内容调试
+    print(f"[调试] {PERCEPTION_SRC} 内容:")
+    for item in os.listdir(PERCEPTION_SRC):
+        print(f"  - {item}")
+else:
+    print(f"[警告] 感知源码目录不存在: {PERCEPTION_SRC}")
+
+# 3. 添加缓存模块路径（按照之前成功的模式）
+CACHE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'cache_manager', 'src')
+sys.path.insert(0, CACHE_SRC)
+
+# 4. 添加规划场景相关路径（如果需要）
+CORE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+OBJ_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'collision_objects', 'src')
+
+sys.path.insert(0, CORE_SRC)
+sys.path.insert(0, OBJ_SRC)
+
+print(f"\n[导入] 开始导入依赖...")
+
+try:
+    # 首先尝试导入夹爪控制器（不依赖感知模块）
+    from grasping.gripper_controller import GripperController
+    print("[导入] ✓ GripperController 导入成功")
+    
+    # 尝试导入感知模块（可能失败，但允许降级）
+    try:
+        from object_detection.object_detector import PureObjectDetector
+        HAS_PURE_DETECTOR = True
+        print("[导入] ✓ PureObjectDetector 导入成功")
+    except ImportError as e:
+        print(f"[导入] ⚠️ PureObjectDetector 导入失败: {e}")
+        print("[导入] ℹ️ 将使用无感知模块模式运行")
+        HAS_PURE_DETECTOR = False
+        PureObjectDetector = None  # 设置为None避免NameError
+    
+    # 尝试导入规划场景（可选）
+    try:
+        from ps_core.scene_client import PlanningSceneClient
+        from ps_objects.object_manager import ObjectManager
+        HAS_SCENE_CLIENT = True
+        print("[导入] ✓ 规划场景客户端导入成功")
+    except ImportError as e:
+        print(f"[导入] ⚠️ 规划场景客户端导入失败: {e}")
+        HAS_SCENE_CLIENT = False
+        PlanningSceneClient = None
+        ObjectManager = None
+    
+    HAS_DEPENDENCIES = True
+    
+except ImportError as e:
+    print(f"[导入] ✗ 关键依赖导入失败: {e}")
+    HAS_DEPENDENCIES = False
+    sys.exit(1)
+
+def parse_arguments():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(
+        description='夹爪控制工具 - 基于物体信息计算夹爪参数',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用示例:
+  %(prog)s --object test_cube                    # 为test_cube计算抓取参数
+  %(prog)s --object red_cup --strategy side      # 指定侧抓策略
+  %(prog)s --object box_1 --dimensions 0.05 0.05 0.05 --type box
+  %(prog)s --status                              # 查看夹爪状态
+  %(prog)s --config                              # 查看当前配置
+  %(prog)s --json                                # JSON格式输出
+  %(prog)s --verbose                             # 详细输出
+        """
+    )
+    
+    # 主要操作
+    action_group = parser.add_mutually_exclusive_group(required=True)
+    action_group.add_argument('--object', type=str, metavar='ID',
+                             help='物体ID（从感知模块获取）')
+    action_group.add_argument('--direct', action='store_true',
+                             help='直接输入物体参数模式')
+    action_group.add_argument('--status', action='store_true',
+                             help='查看夹爪状态')
+    action_group.add_argument('--config', action='store_true',
+                             help='查看当前配置')
+    
+    # 直接模式参数
+    parser.add_argument('--type', type=str, choices=['box', 'cylinder', 'sphere'],
+                       help='物体类型（直接模式使用）')
+    parser.add_argument('--dimensions', type=float, nargs='+',
+                       help='物体尺寸（直接模式使用）')
+    parser.add_argument('--position', type=float, nargs=3, default=[0.7, 0.0, 0.2],
+                       help='物体位置 [x y z]（默认: 0.7 0.0 0.2）')
+    parser.add_argument('--orientation', type=float, nargs=4, default=[0.0, 0.0, 0.0, 1.0],
+                       help='物体方向 [qx qy qz qw]（默认: 0 0 0 1）')    # 抓取策略
+    # 修改 --strategy 的帮助说明：
+    parser.add_argument('--strategy', type=str, default='auto',
+                    choices=['auto', 'side_grasp', 'top_grasp', 
+                                'corner_grasp', 'encompassing_grasp', 'pinch_grasp'],
+                    help='抓取策略 (默认: auto)')
+        # 夹爪配置
+    parser.add_argument('--min-width', type=float, default=0.0,
+                       help='夹爪最小宽度 [m]（默认: 0.0）')
+    parser.add_argument('--max-width', type=float, default=0.1,
+                       help='夹爪最大宽度 [m]（默认: 0.1）')
+    parser.add_argument('--min-force', type=float, default=1.0,
+                       help='最小夹紧力 [N]（默认: 1.0）')
+    parser.add_argument('--max-force', type=float, default=50.0,
+                       help='最大夹紧力 [N]（默认: 50.0）')
+    
+    # 输出选项
+    parser.add_argument('--json', action='store_true',
+                       help='JSON格式输出')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='详细输出')
+    parser.add_argument('--test-all', action='store_true',
+                       help='测试所有预定义物体')
+    # 在 parse_arguments() 函数中添加：
+    parser.add_argument('--mode', type=str, default='auto',
+                    choices=['auto', 'cache_only', 'scene_only', 'hybrid'],
+                    help='检测模式 (默认: auto)')    
+    return parser.parse_args()
+
+
+def print_human_readable(result, verbose=False):
+    """人性化输出"""
+    if isinstance(result, bool):
+        print("✅ 操作成功" if result else "❌ 操作失败")
+        return
+    
+    if not isinstance(result, dict):
+        print(f"⚠️  未知结果类型: {type(result)}")
+        return
+    
+    if not result.get("success", False):
+        print(f"❌ 操作失败: {result.get('error', '未知错误')}")
+        return
+    
+    # 状态查询
+    if "current_width" in result:
+        print("=== 夹爪状态 ===")
+        print(f"当前宽度: {result.get('current_width', 0)*1000:.1f} mm")
+        print(f"当前力: {result.get('current_force', 0):.1f} N")
+        print(f"抓取状态: {'正在抓取' if result.get('is_grasping') else '未抓取'}")
+        return
+    
+    # 配置查询
+    if "config" in result:
+        config = result["config"]
+        print("=== 夹爪配置 ===")
+        print(f"最小宽度: {config.get('min_width', 0)*1000:.1f} mm")
+        print(f"最大宽度: {config.get('max_width', 0.1)*1000:.1f} mm")
+        print(f"最小力: {config.get('min_force', 1):.1f} N")
+        print(f"最大力: {config.get('max_force', 50):.1f} N")
+        print(f"手指长度: {config.get('finger_length', 0.05)*1000:.1f} mm")
+        return
+    
+    # 抓取参数结果
+    if "grasp_parameters" in result:
+        params = result["grasp_parameters"]
+        
+        print(f"=== 抓取方案: {result.get('object_id', '未知物体')} ===")
+        print(f"物体类型: {params.get('object_type', '未知')}")
+        print(f"抓取策略: {params.get('grasp_strategy', '未知')}")
+        print(f"夹爪宽度: {params.get('gripper_width', 0)*1000:.1f} mm")
+        print(f"夹紧力: {params.get('gripper_force', 0):.1f} N")
+        print(f"置信度: {params.get('confidence', 0):.2f}")
+        print(f"来源: {result.get('perception_source', '未知')}")
+        
+        if verbose:
+            print(f"\n详细参数:")
+            print(f"  接近方向: {params.get('approach_direction', [0,0,-1])}")
+            print(f"  抓取深度: {params.get('grasp_depth', 0.02)*1000:.1f} mm")
+            
+            points = params.get('grasp_points', [])
+            if points and len(points) >= 2:
+                print(f"  抓取点1: [{points[0][0]:.3f}, {points[0][1]:.3f}, {points[0][2]:.3f}]")
+                print(f"  抓取点2: [{points[1][0]:.3f}, {points[1][1]:.3f}, {points[1][2]:.3f}]")
+            
+            print(f"  建议: {params.get('recommendation', '无')}")
+        
+        print(f"\n时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+    elif "grasp_strategy" in result:        # 直接模式结果
+        print(f"=== 直接模式抓取计算 ===")
+        print(f"物体类型: {result.get('object_type', '未知')}")
+        print(f"抓取策略: {result.get('grasp_strategy', '未知')}")
+        print(f"夹爪宽度: {result.get('gripper_width', 0)*1000:.1f} mm")
+        print(f"夹紧力: {result.get('gripper_force', 0):.1f} N")
+        print(f"置信度: {result.get('confidence', 0):.2f}")
+        
+        if verbose:
+            print(f"\n详细参数:")
+            points = result.get('grasp_points', [])
+            if points and len(points) >= 2:
+                print(f"  抓取点1: [{points[0][0]:.3f}, {points[0][1]:.3f}, {points[0][2]:.3f}]")
+                print(f"  抓取点2: [{points[1][0]:.3f}, {points[1][1]:.3f}, {points[1][2]:.3f}]")
+            print(f"  建议: {result.get('recommendation', '无')}")
+
+
+def test_all_objects(controller, verbose=False):
+    """测试所有预定义物体"""
+    test_objects = [
+        {
+            "id": "small_cube",
+            "type": "box",
+            "dimensions": [0.03, 0.03, 0.03],
+            "position": [0.7, 0.0, 0.2],
+            "orientation": [0, 0, 0, 1]
+        },
+        {
+            "id": "large_box",
+            "type": "box", 
+            "dimensions": [0.1, 0.05, 0.03],
+            "position": [0.6, 0.1, 0.2],
+            "orientation": [0, 0, 0, 1]
+        },
+        {
+            "id": "tall_cylinder",
+            "type": "cylinder",
+            "dimensions": [0.025, 0.15],  # 半径2.5cm，高15cm
+            "position": [0.5, -0.1, 0.2],
+            "orientation": [0, 0, 0, 1]
+        },
+        {
+            "id": "short_cylinder",
+            "type": "cylinder",
+            "dimensions": [0.04, 0.06],  # 半径4cm，高6cm
+            "position": [0.4, 0.15, 0.2],
+            "orientation": [0, 0, 0, 1]
+        },
+        {
+            "id": "medium_sphere",
+            "type": "sphere",
+            "dimensions": [0.035],  # 半径3.5cm
+            "position": [0.3, -0.15, 0.2],
+            "orientation": [0, 0, 0, 1]
+        }
+    ]
+    
+    print("=== 全面抓取测试 ===")
+    
+    all_results = []
+    for obj in test_objects:
+        print(f"\n测试物体: {obj['id']}")
+        
+        result = controller.calculate_grasp_parameters(obj)
+        
+        if result["success"]:
+            print(f"  ✓ 类型: {obj['type']}")
+            print(f"    宽度: {result['gripper_width']*1000:.1f} mm")
+            print(f"    力: {result['gripper_force']:.1f} N")
+            print(f"    策略: {result['grasp_strategy']}")
+            print(f"    置信度: {result['confidence']:.2f}")
+            
+            all_results.append({
+                "object": obj["id"],
+                "result": result
+            })
+        else:
+            print(f"  ✗ 失败: {result.get('error', '未知错误')}")
+    
+    print(f"\n✅ 测试完成: {len(all_results)}/{len(test_objects)} 成功")
+    return all_results
+
+
+def main():
+    """主函数"""
+    args = parse_arguments()
+    
+    if not HAS_DEPENDENCIES:
+        print("❌ 缺少必要依赖，无法运行")
+        return 1
+    
+    try:
+        # 初始化夹爪控制器
+        controller = GripperController()
+        
+        # 更新配置（如果指定）
+        if args.min_width != 0.0 or args.max_width != 0.1:
+            controller.set_gripper_config({
+                "min_width": args.min_width,
+                "max_width": args.max_width,
+                "min_force": args.min_force,
+                "max_force": args.max_force
+            })
+        
+        result = None
+        
+        # 执行对应操作
+        if args.status:
+            result = controller.get_status()
+            
+        elif args.config:
+            result = {"config": controller.gripper_config}
+            
+        elif args.test_all:
+            results = test_all_objects(controller, args.verbose)
+            if args.json:
+                print(json.dumps({"test_results": results}, indent=2))
+            return 0
+            
+        elif args.direct:            # 直接模式
+            if not args.type or not args.dimensions:
+                print("❌ 直接模式需要 --type 和 --dimensions 参数")
+                return 1
+            
+            object_info = {
+                "type": args.type,
+                "dimensions": args.dimensions,
+                "position": args.position,
+                "orientation": args.orientation
+            }
+            
+            result = controller.calculate_grasp_parameters(object_info, args.strategy)
+            
+        elif args.object:
+            # 集成感知模块模式
+            try:
+                # 根据参数决定模式
+                if args.strategy == "cache_only":  # 可以扩展这个逻辑
+                    # 缓存优先模式
+                    detector = PureObjectDetector(None, None)
+                    detector.set_mode("cache_only")
+                    print("[感知] 模式: 缓存优先")
+                else:
+                    # 尝试连接场景，但允许回退到缓存
+                    try:
+                        client = PlanningSceneClient()
+                        manager = ObjectManager(client)
+                        detector = PureObjectDetector(client, manager)
+                        detector.set_mode("hybrid")  # 混合模式
+                        print("[感知] 模式: 混合 (场景+缓存)")
+                    except:
+                        # 场景连接失败，回退到缓存
+                        detector = PureObjectDetector(None, None)
+                        detector.set_mode("cache_only")
+                        print("[感知] 模式: 缓存 (场景连接失败)")
+                
+            except Exception as e:
+                print(f"[感知] ✗ 无法创建检测器: {e}")
+                return 1
+            
+            # 设置检测器
+            controller.detector = detector
+            
+            # 获取抓取参数
+            result = controller.get_grasp_for_object(args.object, args.strategy)
+        # 输出结果
+        if result:
+            if args.json:
+                print(json.dumps(result, indent=2, default=str))
+            else:
+                print_human_readable(result, args.verbose)
+        
+        return 0 if (result and result.get("success", False)) else 1
+        
+    except Exception as e:
+        print(f"❌ 程序错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

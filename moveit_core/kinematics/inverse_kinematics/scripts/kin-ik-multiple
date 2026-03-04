@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""
+kin-ik: 基本逆运动学求解脚本
+"""
+import sys
+import os
+import argparse
+import json
+import time
+import numpy as np
+
+# ========== 路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+# 计算 moveit_core 的根目录
+MOVEIT_CORE_ROOT = os.path.dirname(PROJECT_ROOT)  # 向上两级到 moveit_core
+print(f"MOVEIT_CORE_ROOT: {MOVEIT_CORE_ROOT}")
+
+# 正确设置 ps_core 的路径
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+IK_SRC = os.path.join(MODULE_ROOT, 'src')
+
+# 添加路径（注意顺序）
+sys.path.insert(0, IK_SRC)           # 1. 先添加逆运动学
+sys.path.insert(0, PLANNING_SCENE_SRC)  # 2. 添加规划场景
+
+try:
+    # 现在应该能正确导入了
+    from ps_core.scene_client import PlanningSceneClient
+    from kin_ik import IKSolver
+    HAS_DEPENDENCIES = True
+    print("✓ 成功导入所有依赖")
+except ImportError as e:
+    print(f"[警告] 导入依赖失败: {e}")
+    import traceback
+    traceback.print_exc()  # 打印完整的堆栈跟踪
+    HAS_DEPENDENCIES = False
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='计算多个逆运动学解',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+示例:
+  kin-ik-multiple --pose "0.5 0.0 0.3 0 0 0 1"
+  kin-ik-multiple --pose "0.5 0.0 0.3 0 0 0 1" --num 10
+  kin-ik-multiple --pose-file pose.json --json
+        '''
+    )
+    
+    parser.add_argument('--pose', type=str, required=True,
+                       help='目标位姿 (x y z qx qy qz qw)')
+    parser.add_argument('--pose-file', type=str,
+                       help='包含位姿的JSON文件')
+    parser.add_argument('--num', type=int, default=5,
+                       help='需要多少个解 (默认: 5)')
+    parser.add_argument('--check-collision', action='store_true',
+                       help='检查碰撞')
+    parser.add_argument('--json', action='store_true',
+                       help='JSON输出格式')
+    parser.add_argument('--verbose', '-v', action='count', default=0)
+    
+    args = parser.parse_args()
+    
+    try:
+        # 初始化
+        client = PlanningSceneClient() if HAS_DEPENDENCIES else None
+        ik_solver = IKSolver(client)
+        
+        # 解析位姿
+        if args.pose_file:
+            with open(args.pose_file, 'r') as f:
+                data = json.load(f)
+            target_pose = data.get("pose")
+        else:
+            target_pose = [float(x) for x in args.pose.split()]
+            if len(target_pose) != 7:
+                print("错误: 需要7个数字")
+                return 1
+        
+        # 求解多个解
+        result = ik_solver.solve_multiple(
+            target_pose, args.num, args.check_collision)
+        
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print(f"\n目标位姿: {target_pose}")
+            print(f"找到 {result['count']} 个解:\n")
+            
+            for i, sol in enumerate(result["solutions"]):
+                print(f"解 {i+1}:")
+                print(f"  关节: {[f'{x:.4f}' for x in sol['solution']]}")
+                print(f"  质量: {sol['quality']:.3f}")
+                print(f"  误差: {sol['error']:.6f}")
+                
+                if args.verbose >= 1:
+                    print(f"  耗时: {sol['elapsed_time']:.3f}s")
+                    print(f"  迭代: {sol['iterations']}")
+                print()
+        
+        return 0 if result["success"] else 1
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

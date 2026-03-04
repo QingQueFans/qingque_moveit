@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""监控轨迹执行状态"""
+import sys
+import os
+import argparse
+import time
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+
+# ========== 正确的路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+# 找到moveit_ros根目录
+current_dir = os.path.dirname(PROJECT_ROOT)
+while current_dir:
+    dir_name = os.path.basename(current_dir)
+    if dir_name == 'moveit_ros':
+        MOVEIT_ROS_ROOT = current_dir
+        MOVEIT_CORE_ROOT = os.path.join(os.path.dirname(current_dir), 'moveit_core')
+        MOVEIT_PLUGINS_ROOT = os.path.join(os.path.dirname(current_dir), 'moveit_plugins')
+        break
+    current_dir = os.path.dirname(current_dir)
+
+# 设置路径
+TRAJECTORY_EXECUTION_SRC = os.path.join(MODULE_ROOT, 'src')
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+
+sys.path.insert(0, TRAJECTORY_EXECUTION_SRC)
+sys.path.insert(0, PLANNING_SCENE_SRC)
+
+print(f"[轨迹监控] 路径设置:")
+print(f"  当前模块: {TRAJECTORY_EXECUTION_SRC}")
+print(f"  规划场景: {PLANNING_SCENE_SRC}")
+
+# ========== 导入检查 ==========
+try:
+    from trajectory_execution import TrajectoryExecutionManager
+    from ps_core.scene_client import PlanningSceneClient
+    HAS_DEPENDENCIES = True
+except ImportError as e:
+    print(f"❌ 导入依赖失败: {e}")
+    HAS_DEPENDENCIES = False
+
+class TrajectoryMonitor(Node):
+    def __init__(self):
+        super().__init__('trajectory_monitor')
+        self.joint_sub = self.create_subscription(
+            JointState, '/joint_states', self.joint_callback, 10
+        )
+        self.last_positions = None
+        self.update_count = 0
+    
+    def joint_callback(self, msg):
+        self.update_count += 1
+        if msg.position and len(msg.position) >= 7:
+            positions = [round(p, 4) for p in msg.position]
+            
+            if self.last_positions:
+                # 检查变化
+                changes = []
+                for i, (new, old) in enumerate(zip(positions, self.last_positions)):
+                    if abs(new - old) > 0.001:
+                        changes.append(f"joint{i+1}: {old:.3f}→{new:.3f}")
+                
+                if changes:
+                    print(f"[{self.update_count}] 变化: {', '.join(changes[:3])}")
+            
+            self.last_positions = positions
+
+def main():
+    if not HAS_DEPENDENCIES:
+        print("❌ 依赖导入失败")
+        return 1
+    
+    parser = argparse.ArgumentParser(description='监控轨迹执行')
+    parser.add_argument('--status', '-s', action='store_true', help='查看执行器状态')
+    parser.add_argument('--history', '-h', type=int, default=5, help='查看历史记录')
+    parser.add_argument('--interval', '-i', type=float, default=1.0, help='监控间隔(秒)')
+    
+    args = parser.parse_args()
+    
+    try:
+        if not rclpy.ok():
+            rclpy.init(args=sys.argv)
+        
+        if args.status:            # 查看执行器状态
+            executor = TrajectoryExecutionManager(None, use_controller_plugin=False)
+            status = executor.get_execution_status()
+            
+            print("\n" + "="*60)
+            print("轨迹执行状态")
+            print("="*60)
+            if status.get("success", False):
+                if status.get("is_executing", False):
+                    print("🟡 正在执行")
+                    print(f"   已执行时间: {status.get('elapsed_time', 0):.2f}秒")
+                    print(f"   进度: {status.get('progress_percent', 0):.1f}%")
+                else:
+                    print("🟢 空闲")
+                print(f"   历史记录数: {status.get('execution_history_count', 0)}")
+            else:
+                print("🔴 状态获取失败")
+                print(f"   错误: {status.get('error', '未知错误')}")
+            print("="*60)
+            
+            executor.destroy()
+        
+        elif args.history:
+            # 查看历史记录
+            executor = TrajectoryExecutionManager(None, use_controller_plugin=False)
+            history = executor.get_execution_history(args.history)
+            
+            print(f"\n最近 {args.history} 条执行记录:")
+            print("-"*60)
+            if history.get("success", False) and history.get("history"):
+                for i, record in enumerate(history["history"]):
+                    status = "✅" if record.get("success") else "❌"
+                    method = record.get("method", "unknown")
+                    duration = record.get("execution_time", 0)
+                    points = record.get("point_count", 0)
+                    print(f"{i+1}. {status} {method}: {points}点, {duration:.2f}秒")
+            else:
+                print("无执行记录")
+            print("-"*60)
+            
+            executor.destroy()
+        
+        else:
+            # 实时监控关节状态
+            print("开始监控关节状态... (按Ctrl+C停止)")
+            print("-"*60)
+            
+            monitor = TrajectoryMonitor()
+            executor = TrajectoryExecutionManager(None, use_controller_plugin=False)
+            
+            try:
+                while rclpy.ok():
+                    # 检查执行状态
+                    status = executor.get_execution_status()
+                    if status.get("is_executing", False):
+                        elapsed = status.get("elapsed_time", 0)
+                        progress = status.get("progress_percent", 0)
+                        print(f"执行中: {elapsed:.1f}s ({progress:.1f}%)")
+                    
+                    rclpy.spin_once(monitor, timeout_sec=args.interval)
+                    
+            except KeyboardInterrupt:
+                print("\n监控已停止")
+            finally:
+                monitor.destroy_node()
+                executor.destroy()
+        
+        return 0
+        
+    except Exception as e:
+        print(f"❌ 监控异常: {e}")
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

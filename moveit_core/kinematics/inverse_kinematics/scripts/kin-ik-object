@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""
+IK求解器物体模式 - 直接通过物体ID求解
+"""
+import sys
+import os
+import argparse
+
+# ========== 路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+
+# 1. 先设置 IK 模块路径
+IK_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, IK_SRC)
+# 2. 查找 moveit_core 根目录
+MOVEIT_CORE_ROOT = os.path.join(SCRIPT_DIR, '..', '..', '..')
+MOVEIT_CORE_ROOT = os.path.abspath(MOVEIT_CORE_ROOT)
+
+# 3. 规划场景路径
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+sys.path.insert(0, PLANNING_SCENE_SRC)
+
+# 4. 缓存管理器路径
+CACHE_MANAGER_SRC = os.path.join(MOVEIT_CORE_ROOT, 'cache_manager', 'src')
+sys.path.insert(0, CACHE_MANAGER_SRC)
+
+print(f"MOVEIT_CORE_ROOT: {MOVEIT_CORE_ROOT}")
+
+try:
+    # 先导入规划场景
+    from ps_core.scene_client import PlanningSceneClient
+    
+    # 再导入 IK 求解器
+    from kin_ik import IKSolver
+    
+    # 尝试导入缓存管理器
+    try:
+        from ps_cache import KinematicsCache
+        HAS_CACHE = True
+    except ImportError as e:
+        HAS_CACHE = False
+        print(f"[警告] 缓存管理器导入失败: {e}")
+    
+    HAS_DEPENDENCIES = True
+    print("✓ 成功导入所有依赖")
+    
+except ImportError as e:
+    print(f"[警告] 导入依赖失败: {e}")
+    import traceback
+    traceback.print_exc()
+    HAS_DEPENDENCIES = False
+    HAS_CACHE = False
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='通过物体ID直接求解逆运动学',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+示例:
+  # 基本使用
+  kin-ik-object --object-id "box"
+  
+  # 指定抓取策略
+  kin-ik-object --object-id "coke_can_01" --grasp-strategy "side"
+  
+  # 批量求解
+  kin-ik-object --objects "box,coke_can_01,test_cube"
+  
+  # 带碰撞检查
+  kin-ik-object --object-id "box" --check-collision
+  
+  # 保存到缓存
+  kin-ik-object --object-id "box" --save-to-cache
+  
+  # JSON输出
+  kin-ik-object --object-id "box" --json
+        '''
+    )
+    
+    # 物体参数
+    parser.add_argument('--object-id', '-o', type=str,
+                       help='单个物体ID')
+    parser.add_argument('--objects', type=str,
+                       help='多个物体ID，用逗号分隔')
+    parser.add_argument('--grasp-strategy', '-g', type=str, default='top',
+                       choices=['top', 'side', 'front', 'back', 'bottom'],
+                       help='抓取策略')
+    
+    # 求解参数
+    parser.add_argument('--seed', type=str,
+                       help='初始种子')
+    parser.add_argument('--check-collision', action='store_true',
+                       help='检查碰撞')
+    parser.add_argument('--offset', type=float, default=0.05,
+                       help='抓取偏移距离（米）')
+    
+    # 缓存参数
+    parser.add_argument('--save-to-cache', action='store_true',
+                       help='保存到缓存')
+    parser.add_argument('--no-cache', action='store_true',
+                       help='不使用缓存')
+    
+    # 输出参数
+    parser.add_argument('--json', action='store_true',
+                       help='JSON输出格式')
+    parser.add_argument('--verbose', '-v', action='count', default=0,
+                       help='详细输出级别')
+    
+    args = parser.parse_args()
+    
+    # 检查输入
+    if not args.object_id and not args.objects:
+        print("错误: 必须提供 --object-id 或 --objects")
+        parser.print_help()
+        return 1
+    
+    try:
+        # 导入求解器
+        from kin_ik import IKSolver
+        from ps_core.scene_client import PlanningSceneClient
+        
+        # 创建求解器
+        client = PlanningSceneClient()
+        ik_solver = IKSolver(client)        # 处理多个物体
+        if args.objects:
+            object_ids = [obj.strip() for obj in args.objects.split(',')]
+            
+            print(f"\n{'='*60}")
+            print(f"批量求解 {len(object_ids)} 个物体")
+            print(f"{'='*60}")
+            
+            result = ik_solver.solve_for_multiple_objects(
+                object_ids=object_ids,
+                grasp_strategy=args.grasp_strategy,
+                seed=[float(x) for x in args.seed.split()] if args.seed else None,
+                check_collision=args.check_collision,
+                save_to_cache=args.save_to_cache and not args.no_cache,
+                offset_distance=args.offset
+            )
+            
+        # 处理单个物体
+        else:
+            print(f"\n{'='*60}")
+            print(f"求解物体: {args.object_id}")
+            print(f"抓取策略: {args.grasp_strategy}")
+            print(f"{'='*60}")
+            
+            result = ik_solver.solve_for_object(
+                object_id=args.object_id,
+                grasp_strategy=args.grasp_strategy,
+                seed=[float(x) for x in args.seed.split()] if args.seed else None,
+                check_collision=args.check_collision,
+                save_to_cache=args.save_to_cache and not args.no_cache,
+                offset_distance=args.offset
+            )
+        
+        # 输出结果
+        if args.json:
+            import json
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            _print_human_readable(result, args.verbose)
+        
+        return 0 if result.get("success", False) else 1
+        
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+def _print_human_readable(result, verbose=0):
+    """打印人类可读的结果"""
+    if "total_objects" in result:  # 批量结果
+        print(f"\n{'='*60}")
+        print(f"批量求解完成")
+        print(f"{'='*60}")
+        print(f"总计: {result['total_objects']} 个物体")
+        print(f"成功: {result['successful']} 个")
+        print(f"失败: {result['failed']} 个")
+        print(f"成功率: {result['success_rate']*100:.1f}%")
+        
+        if verbose >= 1:
+            for i, res in enumerate(result['results']):
+                status = "✅" if res.get('success') else "❌"
+                print(f"\n  [{i+1}] {status} {res.get('object_id', 'unknown')}")
+                if res.get('success'):
+                    print(f"      关节解: {res.get('solution', [])[:3]}...")
+                    if res.get('cache_info', {}).get('saved'):
+                        print(f"      缓存: 已保存")
+    else:  # 单个结果
+        print(f"\n{'='*60}")
+        print(f"求解结果")
+        print(f"{'='*60}")
+        
+        if result["success"]:
+            print(f"✅ 求解成功")
+            print(f"  物体ID: {result['object_id']}")
+            print(f"  抓取策略: {result['grasp_strategy']}")
+            print(f"  关节解: {[round(x, 4) for x in result['solution']]}")
+            print(f"  误差: {result['error']:.6f}")
+            print(f"  耗时: {result['elapsed_time']:.3f}秒")
+            
+            if result.get("cache_info", {}).get("saved"):
+                print(f"  缓存: ✅ 已保存")
+            
+            if result.get("grasp_validation"):
+                valid = result["grasp_validation"]["valid"]
+                print(f"  抓取验证: {'✅ 有效' if valid else '⚠️  警告'}")
+        else:
+            print(f"❌ 求解失败")
+            print(f"  物体ID: {result['object_id']}")
+            print(f"  错误: {result['error']}")
+        
+        print(f"{'='*60}")
+
+if __name__ == "__main__":
+    sys.exit(main())

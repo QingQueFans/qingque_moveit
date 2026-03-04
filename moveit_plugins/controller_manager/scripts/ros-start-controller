@@ -1,0 +1,25 @@
+# moveit_plugins/controller_manager/scripts/ros-start-controller
+#!/usr/bin/env python3
+"""
+启动MoveIt控制器管理器
+"""
+import rclpy
+from controller_manager import MoveItControllerManager
+
+def main():
+    rclpy.init()
+    controller_manager = MoveItControllerManager()
+    
+    print("✅ MoveIt控制器管理器已启动")
+    print("   连接到: /joint_trajectory_controller/follow_joint_trajectory")
+    
+    try:
+        rclpy.spin(controller_manager)
+    except KeyboardInterrupt:
+        print("\n🛑 控制器管理器已停止")
+    finally:
+        controller_manager.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == "__main__":
+    main()

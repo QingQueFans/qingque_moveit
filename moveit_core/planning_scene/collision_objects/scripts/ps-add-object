@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""
+添加碰撞物体到 PlanningScene - 集成统一缓存系统
+"""
+import sys
+import os
+import argparse
+import json
+import time
+# ========== 关键：设置正确的路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # scripts/
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)                # collision_objects/
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)              # planning_scene/
+MOVEIT_CORE_ROOT = os.path.dirname(PROJECT_ROOT)         # moveit_core/
+
+print(f"[路径设置]")
+print(f"  脚本目录: {SCRIPT_DIR}")
+print(f"  模块根目录: {MODULE_ROOT}") 
+print(f"  项目根目录: {PROJECT_ROOT}")
+print(f"  MoveIt核心根目录: {MOVEIT_CORE_ROOT}")
+
+# ========== 1. 添加 core_functions 的 src 到路径 ==========
+CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
+sys.path.insert(0, CORE_SRC)
+print(f"  规划场景核心: {CORE_SRC}")
+
+# ========== 2. 添加 collision_objects 的 src 到路径 ==========
+OBJ_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, OBJ_SRC)
+print(f"  物体管理器: {OBJ_SRC}")
+
+# ========== 3. 添加缓存管理器路径（关键！） ==========
+CACHE_MANAGER_SRC = os.path.join(MOVEIT_CORE_ROOT, 'cache_manager', 'src')
+sys.path.insert(0, CACHE_MANAGER_SRC)
+print(f"  缓存管理器: {CACHE_MANAGER_SRC}")
+
+# ========== 4. 可选：添加其他可能需要路径 ==========
+# 如果有运动学相关模块
+KINEMATICS_ROOT = os.path.join(MOVEIT_CORE_ROOT, 'kinematics')
+if os.path.exists(os.path.join(KINEMATICS_ROOT, 'src')):
+    KIN_SRC = os.path.join(KINEMATICS_ROOT, 'src')
+    sys.path.insert(0, KIN_SRC)
+    print(f"  运动学模块: {KIN_SRC}")
+
+# ========== 现在尝试导入 ==========
+print("\n[导入模块]")
+
+try:
+    # 必须的：规划场景客户端
+    from ps_core.scene_client import PlanningSceneClient
+    print("  ✓ PlanningSceneClient")
+except ImportError as e:
+    print(f"  ✗ PlanningSceneClient: {e}")
+    sys.exit(1)
+
+try:
+    # 物体管理器
+    from ps_objects.object_manager import ObjectManager
+    print("  ✓ ObjectManager")
+except ImportError as e:
+    print(f"  ✗ ObjectManager: {e}")
+    sys.exit(1)
+
+try:
+    # 形状生成器
+    from ps_objects.shape_generator import ShapeGenerator
+    print("  ✓ ShapeGenerator")
+except ImportError as e:
+    print(f"  ✗ ShapeGenerator: {e}")
+    # 可以继续，不是必须的
+
+try:
+    # 物体验证器
+    from ps_objects.object_validator import ObjectValidator
+    print("  ✓ ObjectValidator")
+except ImportError as e:
+    print(f"  ✗ ObjectValidator: {e}")
+    # 可以继续，不是必须的
+
+try:
+    # 统一缓存系统（新增！）
+    from ps_cache.cache_manager import CachePathTools
+    from ps_cache.object_cache import ObjectCache
+    print("  ✓ 统一缓存系统")
+    HAS_UNIFIED_CACHE = True
+except ImportError as e:
+    print(f"  ✗ 统一缓存系统: {e}")
+    HAS_UNIFIED_CACHE = False
+
+print("\n[状态] 所有依赖导入" + ("成功" if 'PlanningSceneClient' in dir() else "失败"))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="添加碰撞物体到 PlanningScene",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 创建立方体
+  %(prog)s --box "my_box" --position "0.5,0,0.5" --size "0.1,0.1,0.1"
+  
+  # 创建球体
+  %(prog)s --sphere "my_sphere" --position "0.3,0.3,0.3" --radius 0.1
+  
+  # 创建圆柱体
+  %(prog)s --cylinder "my_cylinder" --position "0.7,0,0.3" --radius 0.05 --height 0.4
+  
+  # 从JSON文件添加
+  %(prog)s --from-file objects.json
+  
+  # 创建复合物体
+  %(prog)s --composite "table" --config table_config.json
+        """
+    )
+    
+    # 基本参数
+    parser.add_argument('--name', '-n', type=str,
+                       help='物体名称（如果不指定，将自动生成）')
+    
+    # 形状类型参数组
+    shape_group = parser.add_mutually_exclusive_group()
+    shape_group.add_argument('--box', action='store_true', help='创建立方体')
+    shape_group.add_argument('--sphere', action='store_true', help='创建球体')
+    shape_group.add_argument('--cylinder', action='store_true', help='创建圆柱体')
+    shape_group.add_argument('--cone', action='store_true', help='创建圆锥体')
+    shape_group.add_argument('--table', action='store_true', help='创建桌子（立方体）')
+    shape_group.add_argument('--obstacle', action='store_true', help='创建障碍物（立方体）')
+    
+    # 通用形状参数
+    parser.add_argument('--position', '-p', type=str, default="0,0,0.5",
+                       help='位置，格式: "x,y,z" (默认: "0,0,0.5")')
+    parser.add_argument('--size', '-s', type=str, default="0.1,0.1,0.1",
+                       help='尺寸，对于立方体: "长,宽,高" (默认: "0.1,0.1,0.1")')
+    parser.add_argument('--radius', '-r', type=float, default=0.1,
+                       help='半径，对于球体/圆柱体/圆锥体 (默认: 0.1)')
+    parser.add_argument('--height', type=float, default=0.2,
+                       help='高度，对于圆柱体/圆锥体 (默认: 0.2)')
+    parser.add_argument('--orientation', '-o', type=str,
+                       help='姿态四元数，格式: "qx,qy,qz,qw"')
+    
+    # 高级选项
+    parser.add_argument('--from-file', '-f', type=str,
+                       help='从JSON文件加载物体定义')
+    parser.add_argument('--composite', '-c', action='store_true',
+                       help='创建复合物体')
+    parser.add_argument('--config', type=str,
+                       help='复合物体配置文件路径')
+    parser.add_argument('--validate', '-v', action='store_true',
+                       help='添加前验证物体')
+    parser.add_argument('--dry-run', '-d', action='store_true',
+                       help='只验证不实际添加')
+    parser.add_argument('--yes', '-y', action='store_true',
+                       help='跳过确认提示')
+    
+    args = parser.parse_args()
+    
+    try:
+        # 初始化客户端和工具
+        client = PlanningSceneClient()
+        manager = ObjectManager(client)
+        generator = ShapeGenerator()
+        validator = ObjectValidator(client) if args.validate else None        
+        # 解析位置
+        position = [float(x.strip()) for x in args.position.split(',')]
+        
+        # 处理不同形状类型
+        collision_object = None
+        
+        if args.box or args.table or args.obstacle:
+            # 立方体（桌子、障碍物都是立方体）
+            size = [float(x.strip()) for x in args.size.split(',')]
+            name = args.name or ("table" if args.table else 
+                               "obstacle" if args.obstacle else "box")
+            
+            orientation = None
+            if args.orientation:
+                orientation = [float(x.strip()) for x in args.orientation.split(',')]
+            
+            collision_object = generator.create_box(
+                name=name,
+                position=position,
+                size=size,
+                orientation=orientation
+            )
+            
+        elif args.sphere:
+            # 球体
+            name = args.name or "sphere"
+            orientation = None
+            if args.orientation:
+                orientation = [float(x.strip()) for x in args.orientation.split(',')]
+            
+            collision_object = generator.create_sphere(
+                name=name,
+                position=position,
+                radius=args.radius,
+                orientation=orientation
+            )
+            
+        elif args.cylinder:
+            # 圆柱体
+            name = args.name or "cylinder"
+            orientation = None
+            if args.orientation:
+                orientation = [float(x.strip()) for x in args.orientation.split(',')]
+            
+            collision_object = generator.create_cylinder(
+                name=name,
+                position=position,
+                radius=args.radius,
+                height=args.height,
+                orientation=orientation
+            )
+            
+        elif args.cone:
+            # 圆锥体
+            name = args.name or "cone"
+            orientation = None
+            if args.orientation:
+                orientation = [float(x.strip()) for x in args.orientation.split(',')]
+            
+            collision_object = generator.create_cone(
+                name=name,
+                position=position,
+                radius=args.radius,
+                height=args.height,
+                orientation=orientation
+            )
+        
+        elif args.from_file:
+            # 从文件加载
+            print(f"从文件加载: {args.from_file}")
+            with open(args.from_file, 'r') as f:
+                data = json.load(f)
+            
+            file_type = data.get('type', '')
+            file_name = data.get('name', 'from_file')
+            
+            if file_type == 'box':
+                # 单个立方体
+                collision_object = generator.create_box(
+                    name=file_name,
+                    position=data.get('position', [0,0,0.5]),
+                    size=data.get('size', [0.1,0.1,0.1]),
+                    orientation=data.get('orientation')
+                )
+                
+            elif file_type == 'sphere':
+                # 单个球体
+                collision_object = generator.create_sphere(
+                    name=file_name,
+                    position=data.get('position', [0,0,0.5]),
+                    radius=data.get('radius', 0.1),
+                    orientation=data.get('orientation')
+                )
+                
+            elif file_type == 'cylinder':
+                # 单个圆柱体
+                collision_object = generator.create_cylinder(
+                    name=file_name,
+                    position=data.get('position', [0,0,0.5]),
+                    radius=data.get('radius', 0.1),
+                    height=data.get('height', 0.2),
+                    orientation=data.get('orientation')
+                )
+                
+            elif file_type == 'cone':
+                # 单个圆锥体
+                collision_object = generator.create_cone(
+                    name=file_name,
+                    position=data.get('position', [0,0,0.5]),
+                    radius=data.get('radius', 0.1),
+                    height=data.get('height', 0.2),
+                    orientation=data.get('orientation')
+                )
+                
+            elif file_type == 'composite':
+                # 复合物体
+                print(f"创建复合物体: {file_name}")
+                
+                shape_defs = data.get('shapes', [])
+                if not shape_defs:
+                    print(f"错误：复合物体没有定义形状")
+                    return 1
+                    
+                collision_object = generator.create_composite(file_name, shape_defs)
+                print(f"复合物体包含 {len(shape_defs)} 个形状")
+        
+            elif 'objects' in data:
+                # 批量物体格式（包含objects数组）
+                print(f"批量创建 {len(data['objects'])} 个物体")
+                
+                success_count = 0
+                for obj_data in data['objects']:
+                    obj_name = obj_data.get('name', f"object_{success_count}")
+                    obj_type = obj_data.get('type', 'box')
+                    
+                    if obj_type == 'box':
+                        obj = generator.create_box(
+                            name=obj_name,
+                            position=obj_data.get('position', [0,0,0.5]),
+                            size=obj_data.get('size', [0.1,0.1,0.1]),
+                            orientation=obj_data.get('orientation')
+                        )
+                    elif obj_type == 'sphere':
+                        obj = generator.create_sphere(
+                            name=obj_name,
+                            position=obj_data.get('position', [0,0,0.5]),
+                            radius=obj_data.get('radius', 0.1),
+                            orientation=obj_data.get('orientation')
+                        )
+                    elif obj_type == 'cylinder':
+                        obj = generator.create_cylinder(
+                            name=obj_name,
+                            position=obj_data.get('position', [0,0,0.5]),
+                            radius=obj_data.get('radius', 0.1),
+                            height=obj_data.get('height', 0.2),
+                            orientation=obj_data.get('orientation')
+                        )
+                    elif obj_type == 'cone':
+                        obj = generator.create_cone(
+                            name=obj_name,
+                            position=obj_data.get('position', [0,0,0.5]),
+                            radius=obj_data.get('radius', 0.1),
+                            height=obj_data.get('height', 0.2),
+                            orientation=obj_data.get('orientation')
+                        )
+                    else:
+                        print(f"跳过不支持的类型: {obj_type}")
+                        continue
+            
+                    # 添加单个物体
+                    success = manager.add_object_simple(obj)
+                    if success:
+                        success_count += 1
+                        print(f"✅ 添加: {obj_name}")
+                    else:
+                        print(f"❌ 失败: {obj_name}")
+                
+                print(f"批量创建完成: {success_count}/{len(data['objects'])} 成功")
+                return 0 if success_count > 0 else 1
+                
+            else:
+                print(f"不支持的文件格式或缺少type字段")
+                print(f"支持的类型: box, sphere, cylinder, cone, composite")
+                return 1        
+        elif args.composite and args.config:
+            # 复合物体
+            print(f"创建复合物体，配置: {args.config}")
+            with open(args.config, 'r') as f:
+                shape_defs = json.load(f)
+            
+            name = args.name or "composite"
+            collision_object = generator.create_composite(name, shape_defs)
+            
+        else:
+            print("错误：必须指定形状类型")
+            parser.print_help()
+            return 1
+        
+        if not collision_object:
+            print("错误：无法创建物体")
+            return 1       
+        # 验证物体（如果启用）
+        if validator:
+            print("验证物体...")
+            report = validator.get_validation_report(collision_object)
+            print(report)
+            
+            result = validator.validate_scene_addition(collision_object)
+            if not result['valid']:
+                print("❌ 物体验证失败")
+                return 1
+        
+        # 显示物体信息
+        print("\n将要添加的物体:")
+        generator.print_shape_info(collision_object)
+        
+        if args.dry_run:
+            print("⏸️  干运行模式，未实际添加")
+            return 0
+        
+        # 确认提示
+        if not args.yes:
+            confirm = input("\n确认添加？(y/N): ")
+            if confirm.lower() != 'y':
+                print("取消操作")
+                return 0
+        
+        # 添加物体
+        print("正在添加物体...")
+        success = manager.add_object_simple(collision_object)
+        
+        if success:
+            print(f"✅ 物体 '{collision_object.id}' 添加成功")
+            
+            # ========== 添加调试信息 ==========
+            print("\n=== 缓存系统调试 ===")
+            
+            # 1. 查看所有缓存相关的属性
+            cache_attrs = []
+            for attr_name in dir(manager):
+                if 'cache' in attr_name.lower() and not attr_name.startswith('__'):
+                    attr_value = getattr(manager, attr_name)
+                    cache_attrs.append(attr_name)
+                    print(f"  manager.{attr_name}: {type(attr_value)}")
+                    if isinstance(attr_value, dict):
+                        print(f"    字典内容: {list(attr_value.keys())[:3]}...")  # 只显示前3个key
+            
+            print(f"  找到的缓存属性: {cache_attrs}")
+            
+            # 2. 检查具体的方法
+            print("\n=== 检查缓存方法 ===")
+            if hasattr(manager, '_save_object_to_unified_cache'):
+                print("  ✓ 找到方法: _save_object_to_unified_cache")
+            elif hasattr(manager, 'save_to_unified_cache'):
+                print("  ✓ 找到方法: save_to_unified_cache")
+            elif hasattr(manager, 'save_object_to_unified_cache'):
+                print("  ✓ 找到方法: save_object_to_unified_cache")
+            else:
+                print("  ✗ 未找到明确的缓存保存方法")
+            
+            # 3. 尝试调用缓存方法
+            print("\n=== 尝试保存到缓存 ===")
+            try:
+                # 首先尝试我建议的方法名
+                if hasattr(manager, '_save_object_to_unified_cache'):
+                    print("  调用 _save_object_to_unified_cache...")
+                    cache_path = manager._save_object_to_unified_cache(collision_object)
+                    if cache_path:
+                        print(f"  ✅ 缓存保存成功: {cache_path}")
+                    else:
+                        print("  ❌ 缓存保存失败（返回空路径）")
+                        
+                # 如果没有，尝试其他可能的方法名
+                elif hasattr(manager, 'save_to_unified_cache'):
+                    print("  调用 save_to_unified_cache...")
+                    cache_path = manager.save_to_unified_cache(collision_object)
+                    if cache_path:
+                        print(f"  ✅ 缓存保存成功: {cache_path}")
+                    else:
+                        print("  ❌ 缓存保存失败")
+                        
+                else:
+                    print("  ⚠️  没有可用的统一缓存方法，只保存到简单缓存")
+                    
+            except Exception as e:
+                print(f"  ❌ 缓存方法调用异常: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # 4. 最终验证
+            print("\n=== 最终验证 ===")
+            import time
+            time.sleep(0.3)
+            current_objects = manager.list_objects()
+            
+            if collision_object.id in current_objects:
+                print("✅ 验证：物体已在场景中")
+            else:
+                print("⚠️  警告：物体可能未正确显示（尝试刷新RViz）")
+            
+            return 0
+        else:
+            print("❌ 添加物体失败")
+            return 1
+            
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

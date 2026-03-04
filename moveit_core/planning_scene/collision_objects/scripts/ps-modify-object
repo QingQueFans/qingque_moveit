@@ -1,0 +1,454 @@
+#!/usr/bin/env python3
+"""
+修改 PlanningScene 中的碰撞物体 - 缓存增强版
+"""
+import sys
+import os
+import argparse
+import json
+import time
+sys.path.append(os.path.expanduser('~/qingfu_moveit/moveit_core/planning_scene'))
+
+# ========== 关键：设置正确的路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # scripts/
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)                # collision_objects/
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)              # planning_scene/
+
+# 添加 core_functions 的 src 到路径
+CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
+sys.path.insert(0, CORE_SRC)
+
+# 添加 collision_objects 的 src 到路径
+OBJ_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, OBJ_SRC)
+
+# 现在可以正常导入
+from ps_core.scene_client import PlanningSceneClient
+from ps_objects.object_manager import ObjectManager
+from ps_objects.shape_generator import ShapeGenerator
+from ps_objects.object_validator import ObjectValidator
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="修改 PlanningScene 中的碰撞物体 - 缓存增强版",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 简单移动物体（自动使用缓存中的尺寸和类型）
+  %(prog)s "my_box" --move-to "0.5,0.2,0.3"
+  
+  # 修改尺寸（保持位置和类型不变）
+  %(prog)s "my_box" --resize "0.3,0.2,0.1"
+  
+  # 旋转物体
+  %(prog)s "my_box" --rotate "0,0,0.707,0.707"
+  
+  # 重命名物体
+  %(prog)s "old_name" --rename "new_name"
+  
+  # 修改位置和尺寸
+  %(prog)s "my_box" --move-to "0.6,0.3,0.4" --resize "0.3,0.2,0.2"
+  
+  # 批量修改匹配的物体
+  %(prog)s --pattern "obstacle_*" --move-to "0,0,0.5"
+        """
+    )
+    
+    # 目标物体参数
+    parser.add_argument('object_id', type=str, nargs='?',
+                       help='要修改的物体ID（如果使用--pattern则不需要）')
+    
+    # 修改参数
+    parser.add_argument('--move-to', '-m', type=str,
+                       help='移动到新位置，格式: "x,y,z"')
+    parser.add_argument('--position', '-p', type=str,
+                       help='新位置（同--move-to）')
+    parser.add_argument('--resize', '-r', type=str,
+                       help='调整尺寸，格式: "x,y,z" 或单个值')
+    parser.add_argument('--size', '-s', type=str,
+                       help='新尺寸（同--resize）')
+    parser.add_argument('--rotate', '-o', type=str,
+                       help='旋转物体，四元数格式: "qx,qy,qz,qw"')
+    parser.add_argument('--orientation', type=str,
+                       help='新姿态（同--rotate）')
+    parser.add_argument('--rename', '-n', type=str,
+                       help='重命名物体')
+    parser.add_argument('--copy-to', '-c', type=str,
+                       help='复制到新名称')    
+    # 批量修改选项
+    parser.add_argument('--pattern', type=str,
+                       help='使用通配符模式匹配多个物体')
+    
+    # 高级选项
+    parser.add_argument('--validate', '-v', action='store_true',
+                       help='修改后验证物体')
+    parser.add_argument('--dry-run', '-d', action='store_true',
+                       help='只显示修改计划，不实际执行')
+    parser.add_argument('--yes', '-y', action='store_true',
+                       help='跳过确认提示')
+    parser.add_argument('--keep-original', '-k', action='store_true',
+                       help='复制时保留原物体')
+    parser.add_argument('--force', action='store_true',
+                       help='强制修改，即使验证失败')
+    parser.add_argument('--show-cache', action='store_true',
+                       help='显示缓存信息')
+    
+    args = parser.parse_args()
+    
+    # 参数验证
+    if not args.object_id and not args.pattern and not args.show_cache:
+        print("错误：必须指定物体ID或使用--pattern")
+        parser.print_help()
+        return 1
+    
+    try:
+        # 初始化客户端和工具
+        client = PlanningSceneClient()
+        manager = ObjectManager(client)
+        generator = ShapeGenerator()
+        validator = ObjectValidator(client) if args.validate else None
+        
+        # 显示缓存信息
+        if args.show_cache:
+            current_objects = manager.list_objects()
+            print("缓存信息:")
+            print("=" * 50)
+            print(f"场景中物体数量: {len(current_objects)}")
+            
+            for obj_id in current_objects:
+                cached = manager.get_object_from_cache(obj_id)
+                if cached:
+                    print(f"\n{obj_id}:")
+                    print(f"  类型: {cached.get('type', 'unknown')}")
+                    print(f"  尺寸: {cached.get('dimensions', [])}")
+                    print(f"  位置: {cached.get('position', [])}")
+                else:
+                    print(f"\n{obj_id}: (无缓存)")
+            return 0
+        
+        # 获取当前所有物体
+        current_objects = manager.list_objects()
+        
+        # 确定要修改的物体列表
+        objects_to_modify = []
+        
+        if args.pattern:
+            # 使用通配符匹配
+            import fnmatch
+            pattern = args.pattern
+            for obj_id in current_objects:
+                if fnmatch.fnmatch(obj_id, pattern):
+                    objects_to_modify.append(obj_id)
+            
+            if not objects_to_modify:
+                print(f"没有物体匹配模式: {pattern}")
+                return 1
+                
+            print(f"找到 {len(objects_to_modify)} 个匹配的物体")
+            
+        else:
+            # 单个物体
+            if args.object_id not in current_objects:
+                print(f"错误：物体 '{args.object_id}' 不存在")
+                print(f"当前存在的物体: {', '.join(current_objects)}")
+                return 1
+            
+            objects_to_modify = [args.object_id]        
+        # 处理每个要修改的物体
+        modifications = []
+        
+        for obj_id in objects_to_modify:
+            # 在获取缓存前添加：
+            print(f"[调试] object_cache类型: {type(manager.object_cache)}")
+            print(f"[调试] object_cache内容: {manager.object_cache}")
+            print(f"[调试] 尝试获取: '{obj_id}'")
+
+            cached_info = manager.get_object_from_cache(obj_id)
+            print(f"[调试] 获取结果: {cached_info}")
+            
+            
+            if not cached_info:
+                print(f"⚠️  警告：物体 '{obj_id}' 不在缓存中")
+                print(f"    可能原因：1) 物体是之前创建的 2) 缓存被清除")
+                print(f"    解决方案：请提供完整参数")
+            
+            # 创建修改计划
+            modification = {
+                'original_id': obj_id,
+                'new_id': args.rename if args.rename else obj_id,
+                'cached_info': cached_info,
+                'changes': []
+            }
+            
+            # 解析参数
+            if args.move_to:
+                position = [float(x.strip()) for x in args.move_to.split(',')]
+                modification['position'] = position
+                modification['changes'].append(f"移动到: {position}")
+            elif args.position:
+                position = [float(x.strip()) for x in args.position.split(',')]
+                modification['position'] = position
+                modification['changes'].append(f"移动到: {position}")
+            
+            if args.resize:
+                size = [float(x.strip()) for x in args.resize.split(',')]
+                modification['size'] = size
+                modification['changes'].append(f"尺寸调整为: {size}")
+            elif args.size:
+                size = [float(x.strip()) for x in args.size.split(',')]
+                modification['size'] = size
+                modification['changes'].append(f"尺寸调整为: {size}")
+            
+            if args.rotate:
+                orientation = [float(x.strip()) for x in args.rotate.split(',')]
+                modification['orientation'] = orientation
+                modification['changes'].append(f"旋转为: {orientation}")
+            elif args.orientation:
+                orientation = [float(x.strip()) for x in args.orientation.split(',')]
+                modification['orientation'] = orientation
+                modification['changes'].append(f"旋转为: {orientation}")
+            
+            if args.copy_to:
+                modification['action'] = 'copy'
+                modification['new_id'] = args.copy_to
+                modification['keep_original'] = args.keep_original
+                modification['changes'].append(f"复制到: {args.copy_to}")
+            
+            modifications.append(modification)        
+        # 显示修改计划
+        print(f"\n修改计划 (共 {len(modifications)} 个物体):")
+        print("=" * 60)
+        
+        for i, mod in enumerate(modifications, 1):
+            print(f"{i:2d}. {mod['original_id']}")
+            
+            if mod['new_id'] != mod['original_id']:
+                print(f"    新名称: {mod['new_id']}")
+            
+            for change in mod['changes']:
+                print(f"    • {change}")
+            
+            # 显示缓存信息
+            if mod['cached_info']:
+                cached = mod['cached_info']
+                print(f"    缓存类型: {cached.get('type', 'unknown')}")
+                print(f"    原尺寸: {cached.get('dimensions', [])}")
+                print(f"    原位置: {cached.get('position', [])}")
+            else:
+                print(f"    ⚠️  无缓存信息")
+            
+            if mod.get('action') == 'copy':
+                print(f"    操作: 复制{'（保留原物体）' if mod.get('keep_original') else ''}")
+            else:
+                print(f"    操作: 修改")
+            print()
+        
+        if args.dry_run:
+            print("⏸️  干运行模式，未实际修改")
+            return 0
+        
+        # 确认提示
+        if not args.yes:
+            confirm = input(f"\n确认修改 {len(modifications)} 个物体？(y/N): ")
+            if confirm.lower() != 'y':
+                print("取消操作")
+                return 0
+        
+        # 执行修改
+        success_count = 0
+        failed_count = 0
+        
+        for mod in modifications:
+            try:
+                obj_id = mod['original_id']
+                new_id = mod['new_id']
+                cached_info = mod['cached_info']
+                
+                print(f"\n处理物体: {obj_id} → {new_id}")
+                
+                # 对于复制操作
+                if mod.get('action') == 'copy':
+                    if not cached_info:
+                        print(f"❌ 无法复制：没有缓存信息")
+                        failed_count += 1
+                        continue
+                    
+                    # 使用缓存信息创建新物体
+                    position = mod.get('position', cached_info.get('position', [0, 0, 0.5]))
+                    orientation = mod.get('orientation', cached_info.get('orientation', [0, 0, 0, 1]))
+                    
+                    obj_type = cached_info.get('type', 'box')
+                    if obj_type == 'box':
+                        size = mod.get('size', cached_info.get('dimensions', [0.1, 0.1, 0.1]))
+                        new_obj = generator.create_box(
+                            name=new_id,
+                            position=position,
+                            size=size,
+                            orientation=orientation
+                        )
+                    elif obj_type == 'sphere':
+                        radius = cached_info.get('dimensions', [0.1])[0]
+                        new_obj = generator.create_sphere(
+                            name=new_id,
+                            position=position,
+                            radius=radius,
+                            orientation=orientation
+                        )
+                    # ... 其他类型类似
+                    
+                    success = manager.add_object_simple(new_obj)
+                    
+                    if success:
+                        print(f"✅ 复制成功: {obj_id} → {new_id}")
+                        success_count += 1
+                    else:
+                        print(f"❌ 复制失败")
+                        failed_count += 1
+                    
+                    continue
+                
+                # 对于修改操作：先移除后添加
+                print(f"1. 移除原物体...")
+                remove_success = manager.remove_object_simple(obj_id)
+                
+                if not remove_success:
+                    print(f"❌ 移除失败")
+                    failed_count += 1
+                    continue
+                
+                time.sleep(0.2)
+                
+                print(f"2. 创建新物体...")
+                
+                # 使用缓存信息或默认值
+                if cached_info:
+                    print(f"   ✅ 使用缓存信息")
+                    obj_type = cached_info.get('type', 'box')
+                    
+                    # 优先使用用户指定的值，否则用缓存的值
+                    position = mod.get('position', cached_info.get('position', [0, 0, 0.5]))
+                    size = mod.get('size', cached_info.get('dimensions', [0.1, 0.1, 0.1]))
+                    
+                    # 先获取
+                    orientation_raw = mod.get('orientation', cached_info.get('orientation', [0, 0, 0, 1]))
+                    
+                    # 再转换
+                    orientation = [
+                        float(orientation_raw[0]),
+                        float(orientation_raw[1]),
+                        float(orientation_raw[2]),
+                        float(orientation_raw[3])
+                    ] if len(orientation_raw) == 4 else [0.0, 0.0, 0.0, 1.0]    
+                else:
+                    print(f"   ⚠️  使用默认值（无缓存）")
+                    obj_type = 'box'
+                    position = mod.get('position', [0, 0, 0.5])
+                    size = mod.get('size', [0.1, 0.1, 0.1])
+                    
+                    # 先获取原始值
+                    orientation_raw = mod.get('orientation', [0, 0, 0, 1])
+                    
+                    # 然后转换为float
+                    orientation = [
+                        float(orientation_raw[0]),
+                        float(orientation_raw[1]), 
+                        float(orientation_raw[2]),
+                        float(orientation_raw[3])
+                    ] if len(orientation_raw) == 4 else [0.0, 0.0, 0.0, 1.0]
+                # 根据类型创建新物体
+                if obj_type == 'box':
+                    new_obj = generator.create_box(
+                        name=new_id,
+                        position=position,
+                        size=size,
+                        orientation=orientation
+                    )
+                elif obj_type == 'sphere':
+                    radius = size[0] if size else 0.1
+                    new_obj = generator.create_sphere(
+                        name=new_id,
+                        position=position,
+                        radius=radius,
+                        orientation=orientation
+                    )
+                elif obj_type == 'cylinder':
+                    radius = size[0] if len(size) > 0 else 0.1
+                    height = size[1] if len(size) > 1 else 0.2
+                    new_obj = generator.create_cylinder(
+                        name=new_id,
+                        position=position,
+                        radius=radius,
+                        height=height,
+                        orientation=orientation
+                    )
+                elif obj_type == 'cone':
+                    radius = size[0] if len(size) > 0 else 0.1
+                    height = size[1] if len(size) > 1 else 0.2
+                    new_obj = generator.create_cone(
+                        name=new_id,
+                        position=position,
+                        radius=radius,
+                        height=height,
+                        orientation=orientation
+                    )
+                else:
+                    # 默认创建立方体
+                    new_obj = generator.create_box(
+                        name=new_id,
+                        position=position,
+                        size=size,
+                        orientation=orientation
+                    )
+                
+                # 添加新物体
+                add_success = manager.add_object_simple(new_obj)
+                
+                if add_success:
+                    print(f"✅ 修改成功")
+                    print(f"   类型: {obj_type}")
+                    print(f"   位置: {position}")
+                    print(f"   尺寸: {size}")
+                    
+                    # 验证
+                    if validator:
+                        result = validator.validate_scene_addition(new_obj)
+                        if result['valid']:
+                            print(f"   ✅ 验证通过")
+                        else:
+                            print(f"   ⚠️  验证警告")
+                    
+                    success_count += 1
+                else:
+                    print(f"❌ 添加失败")
+                    failed_count += 1
+                    
+            except Exception as e:
+                print(f"❌ 修改失败: {e}")
+                import traceback
+                traceback.print_exc()
+                failed_count += 1
+        
+        # 显示结果
+        print(f"\n{'='*50}")
+        print(f"修改完成:")
+        print(f"  ✅ 成功: {success_count}")
+        print(f"  ❌ 失败: {failed_count}")
+        
+        if failed_count == 0:
+            print("✅ 所有修改成功")
+            return 0
+        else:
+            print("⚠️  部分修改失败")
+            return 1
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

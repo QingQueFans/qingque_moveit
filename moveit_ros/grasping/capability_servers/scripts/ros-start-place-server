@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""
+ps-start-pick-server: 抓取服务器启动脚本
+完整命令行接口，集成缓存功能
+"""
+import sys
+import os
+import argparse
+import json
+import time
+
+# ========== 路径设置（按照你的参考修正） ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+print(f"[脚本] 脚本目录: {SCRIPT_DIR}")
+print(f"[脚本] 模块根目录: {MODULE_ROOT}")
+print(f"[脚本] 项目根目录: {PROJECT_ROOT}")
+
+# 找到moveit_ros根目录
+current_dir = os.path.dirname(PROJECT_ROOT)
+while current_dir:
+    dir_name = os.path.basename(current_dir)
+    if dir_name == 'moveit_ros':
+        MOVEIT_ROS_ROOT = current_dir
+        MOVEIT_CORE_ROOT = os.path.join(os.path.dirname(current_dir), 'moveit_core')
+        MOVEIT_PLUGINS_ROOT = os.path.join(os.path.dirname(current_dir), 'moveit_plugins')
+        break
+    current_dir = os.path.dirname(current_dir)
+
+# 设置路径
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+PLANNING_SCENE_SRCQ = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'unified_tools', 'src')
+MOVEIT_CONTROLLER_SRC = os.path.join(MOVEIT_PLUGINS_ROOT, 'moveit_controller_manager', 'src')
+TRAJECTORY_EXECUTION_SRC = os.path.join(MODULE_ROOT, 'src')
+
+sys.path.insert(0, TRAJECTORY_EXECUTION_SRC)
+sys.path.insert(0, MOVEIT_CONTROLLER_SRC)
+sys.path.insert(0, PLANNING_SCENE_SRC)
+sys.path.insert(0, PLANNING_SCENE_SRCQ)
+
+print(f"[脚本] 路径设置:")
+print(f"  当前模块: {TRAJECTORY_EXECUTION_SRC}")
+print(f"  控制器管理器: {MOVEIT_CONTROLLER_SRC}")
+print(f"  规划场景: {PLANNING_SCENE_SRC}")
+
+# 还需要添加其他必要的路径
+CACHE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'cache_manager', 'src')
+OBJ_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'collision_objects', 'src')
+sys.path.insert(0, CACHE_SRC)
+sys.path.insert(0, OBJ_SRC)
+
+try:
+    from ps_core.scene_client import PlanningSceneClient
+    from place_action_server import PlaceActionServer
+    
+    print("✓ 成功导入所有依赖")
+    
+except ImportError as e:
+    print(f"导入失败: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+
+def main():
+    import time
+    """主函数 - 完整的命令行接口"""
+    parser = argparse.ArgumentParser(
+        description='放置服务器 - 提供物体放置（释放）服务，集成运动学缓存',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用示例:
+  %(prog)s --test --object cube_1                    # 测试放置
+  %(prog)s --test --object cube_1 --position 0.5,0,0.5  # 指定位置
+  %(prog)s --test --object cube_1 --orientation 0,0.707,0,0.707  # 指定方向
+  %(prog)s --server                                 # 启动服务器模式
+  %(prog)s --status                                 # 检查服务器状态
+  
+缓存功能:
+  - 自动检查运动学缓存中的IK解
+  - 如果未找到缓存，计算并保存IK解
+  - 后续调用使用缓存的IK解提高效率
+        """
+    )
+    
+    # 主要模式
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument('--test', action='store_true', 
+                          help='测试模式（执行一次放置后退出）')
+    mode_group.add_argument('--server', action='store_true', 
+                          help='服务器模式（持续运行）')
+    mode_group.add_argument('--status', action='store_true',
+                          help='检查服务器状态')
+    
+    # 放置参数
+    parser.add_argument('--object', type=str, default='test_object',
+                       help='物体ID (默认: test_object)')
+    parser.add_argument('--position', type=str, default='0.5,0.0,0.5',
+                       help='放置位置 x,y,z (默认: 0.5,0.0,0.5)')
+    parser.add_argument('--orientation', type=str, default='',
+                       help='放置方向 qx,qy,qz,qw (如: 0,0,0,1)')
+    
+    # 机器人配置
+    parser.add_argument('--robot', type=str, default='panda',
+                       help='机器人模型 (默认: panda)')
+    
+    # 输出选项
+    parser.add_argument('--json', action='store_true',
+                       help='JSON格式输出')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='详细输出')
+    parser.add_argument('--no-cache', action='store_true',
+                       help='禁用缓存（强制重新计算IK）')
+    
+    args = parser.parse_args()
+    
+    try:        # 1. 初始化客户端（必须）
+        if args.verbose:
+            print("[初始化] 创建PlanningSceneClient...")
+        client = PlanningSceneClient()
+        
+        # 2. 初始化服务器（必须传递client）
+        if args.verbose:
+            print("[初始化] 创建PlaceActionServer...")
+        server = PlaceActionServer(client)
+        
+        # 3. 设置机器人配置
+        if args.robot != 'panda':
+            server.set_robot_config({"name": args.robot})
+            if args.verbose:
+                print(f"[配置] 使用机器人: {args.robot}")
+        
+        # 4. 检查服务器状态
+        if args.status:
+            status = server.get_server_status()
+            if args.json:
+                print(json.dumps(status, indent=2, default=str))
+            else:
+                print("=== 放置服务器状态 ===")
+                print(f"服务器: {status['server']}")
+                print(f"状态: {'运行中' if status['active'] else '停止'}")
+                print(f"机器人: {status.get('robot', 'panda')}")
+                print(f"控制器: {'✓ 就绪' if status['controllers_ready'] else '✗ 未就绪'}")
+                print(f"时间: {status['timestamp']}")
+            return 0
+        
+        # 5. 测试模式
+        if args.test:
+            print(f"=== 测试放置 ===")
+            print(f"物体: {args.object}")
+            print(f"机器人: {args.robot}")
+            
+            # 解析参数
+            position = [float(x) for x in args.position.split(',')]
+            orientation = None
+            
+            if args.orientation:
+                orientation = [float(x) for x in args.orientation.split(',')]
+                if args.verbose:
+                    print(f"指定方向: {orientation}")
+            
+            if args.verbose:
+                print(f"放置位置: {position}")
+            
+            # 禁用缓存选项
+            cache_disabled = args.no_cache
+            if cache_disabled:
+                print("[警告] 缓存已禁用，强制重新计算IK")
+            
+            # 执行放置
+            start_time = time.time()
+            result = server.place_object(
+                object_id=args.object,
+                position=position,
+                orientation=orientation
+            )
+            elapsed_time = time.time() - start_time
+            
+            # 输出结果
+            if args.json:
+                print(json.dumps(result, indent=2, default=str))
+            else:
+                if result["success"]:
+                    print(f"✓ 放置成功!")
+                    print(f"  物体: {result['object_id']}")
+                    print(f"  位置: {result['place_position']}")
+                    print(f"  耗时: {result['execution_time']:.2f}秒")
+                    
+                    # 显示缓存使用情况
+                    if result.get('cache_used', False):
+                        print(f"  缓存: ✓ 使用缓存的IK解")
+                    else:
+                        print(f"  缓存: ✗ 未使用缓存（新计算）")
+                    
+                    # 显示元数据
+                    if 'metadata' in result:
+                        meta = result['metadata']
+                        print(f"  方法: {meta.get('method', 'unknown')}")
+                else:
+                    print(f"✗ 放置失败!")
+                    print(f"  错误: {result.get('error', '未知错误')}")
+                    return 1
+            
+            return 0 if result.get("success", False) else 1
+        
+        # 6. 服务器模式（如果没有指定任何模式，默认启动服务器）
+        print("=" * 60)
+        print("放置动作服务器 - 集成运动学缓存")
+        print("=" * 60)
+        print("功能:")
+        print("  • 提供物体放置（释放）服务")
+        print("  • 自动使用运动学缓存加速IK计算")
+        print("  • 支持多种机器人模型")
+        print("=" * 60)
+        print("服务器已启动，等待请求...")
+        print("按 Ctrl+C 停止服务器")
+        print("-" * 60)
+        
+        # 显示服务器状态
+        status = server.get_server_status()
+        print(f"状态: 运行中")
+        print(f"机器人: {status.get('robot', 'panda')}")
+        print(f"控制器: {'✓ 就绪' if status['controllers_ready'] else '✗ 未就绪'}")
+        print(f"启动时间: {status['timestamp']}")
+        print("-" * 60)
+        
+        # 保持运行
+        import time
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n服务器正在关闭...")
+            return 0
+            
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

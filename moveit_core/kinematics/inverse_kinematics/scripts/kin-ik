@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""
+kin-ik: 基本逆运动学求解脚本
+"""
+import sys
+import os
+import argparse
+import json
+import time
+import math
+import numpy as np
+from typing import List, Optional, Dict, Union, Tuple
+
+# ========== 路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+
+# 1. 先设置 IK 模块路径
+IK_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, IK_SRC)
+
+# 2. 查找 moveit_core 根目录
+MOVEIT_CORE_ROOT = os.path.join(SCRIPT_DIR, '..', '..', '..')
+MOVEIT_CORE_ROOT = os.path.abspath(MOVEIT_CORE_ROOT)
+
+# 3. 规划场景路径
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+sys.path.insert(0, PLANNING_SCENE_SRC)
+
+# 4. 缓存管理器路径
+CACHE_MANAGER_SRC = os.path.join(MOVEIT_CORE_ROOT, 'cache_manager', 'src')
+sys.path.insert(0, CACHE_MANAGER_SRC)
+
+print(f"MOVEIT_CORE_ROOT: {MOVEIT_CORE_ROOT}")
+
+try:
+    # 先导入规划场景
+    from ps_core.scene_client import PlanningSceneClient
+    
+    # 再导入 IK 求解器
+    from kin_ik import IKSolver
+    
+    # 尝试导入缓存管理器
+    try:
+        from ps_cache import KinematicsCache
+        HAS_CACHE = True
+    except ImportError as e:
+        HAS_CACHE = False
+        print(f"[警告] 缓存管理器导入失败: {e}")
+    
+    HAS_DEPENDENCIES = True
+    print("✓ 成功导入所有依赖")
+    
+except ImportError as e:
+    print(f"[警告] 导入依赖失败: {e}")
+    import traceback
+    traceback.print_exc()
+    HAS_DEPENDENCIES = False
+    HAS_CACHE = False
+
+
+def print_result_human(result, verbose=0):
+    """打印人类可读的结果"""
+    print("\n" + "="*60)
+    print("逆运动学求解结果")
+    print("="*60)
+    
+    if result["success"]:
+        print(f"✓ 求解成功")
+        print(f"  关节角度: {[f'{x:.4f}' for x in result['solution']]}")
+        print(f"  误差: {result['error']:.6f}")
+        print(f"  迭代次数: {result['iterations']}")
+        print(f"  耗时: {result['elapsed_time']:.3f}秒")
+        print(f"  解质量: {result['quality']:.3f}")
+        
+        # 缓存信息（从求解器返回）
+        cache_info = result.get("cache_info", {})
+        if cache_info.get("saved"):
+            print(f"  缓存: ✓ 已保存")
+            if cache_info.get("cache_id"):
+                print(f"    缓存ID: {cache_info['cache_id']}")
+            if cache_info.get("object_id"):
+                print(f"    关联物体: {cache_info['object_id']}")
+            if verbose >= 1 and cache_info.get("cache_path"):
+                print(f"    路径: {cache_info['cache_path']}")
+        elif "cache_info" in result:
+            print(f"  缓存: ✗ 未保存")
+        
+        if "collision_free" in result and result["collision_free"] is not None:
+            status = "✓ 无碰撞" if result["collision_free"] else "✗ 有碰撞"
+            print(f"  碰撞检查: {status}")
+        
+        if verbose >= 1:
+            print(f"\n  元数据:")
+            for key, value in result.get("metadata", {}).items():
+                print(f"    {key}: {value}")
+    else:
+        print(f"✗ 求解失败")
+        print(f"  错误: {result['error']}")
+        
+        if "suggestions" in result:
+            print("  建议:")
+            for suggestion in result["suggestions"]:
+                print(f"    - {suggestion}")
+    
+    print(f"  时间戳: {result['timestamp']}")
+    print("="*60)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='基本逆运动学求解',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+示例:
+  # 基础用法
+  kin-ik --pose "0.5 0.0 0.3 0 0 0 1"
+  kin-ik --pose "0.5 0.0 0.3 0 0 0 1" --seed "0 0 0 0 0 0"
+  
+  # 带缓存保存（新方式）
+  kin-ik --pose "0.5 0.0 0.3 0 0 0 1" --save-to-cache
+  kin-ik --pose "0.6 0.1 0.2 0 0 0 1" --object-id "coke_can" --save-to-cache
+  
+  # 带碰撞检查
+  kin-ik --pose-file target.json --check-collision
+  
+  # JSON输出
+  kin-ik --pose "0.5 0.0 0.3 0 0 0 1" --json --verbose
+  
+  # 预填充缓存（用于轨迹执行器）
+  kin-ik --pose "0.5 0.2 0.4 0 0 0 1" --object-id "grasp_pose_01" --save-to-cache --robot-model-name "UR5"
+        '''
+    )
+    
+    # 输入参数
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument('--pose', type=str,
+                            help='目标位姿 (x y z qx qy qz qw)')
+    input_group.add_argument('--pose-file', type=str,
+                            help='包含位姿的JSON文件')
+    input_group.add_argument('--joints', type=str,
+                            help='关节角度，用于计算当前位置')    # 求解选项
+    parser.add_argument('--seed', type=str,
+                        help='初始种子 (空格分隔的关节角度)')
+    parser.add_argument('--check-collision', action='store_true',
+                        help='检查碰撞')
+    parser.add_argument('--robot-model', type=str,
+                        help='机器人模型配置文件')
+    
+    # 缓存选项
+    parser.add_argument('--save-to-cache', action='store_true',
+                        help='保存结果到缓存（通过求解器统一接口）')
+    parser.add_argument('--cache-id', type=str,
+                        help='自定义缓存ID')
+    parser.add_argument('--robot-model-name', type=str, default='6DOF_Manipulator',
+                        help='机器人模型名称（用于缓存标识）')
+    parser.add_argument('--object-id', type=str,
+                        help='物体ID（用于带物体的操作，会自动保存到缓存元数据）')
+    
+    # 输出选项
+    parser.add_argument('--json', action='store_true',
+                        help='JSON输出格式')
+    parser.add_argument('--verbose', '-v', action='count', default=0,
+                        help='详细输出级别')
+    
+    args = parser.parse_args()
+    
+    try:
+        # 1. 初始化
+        client = PlanningSceneClient() if HAS_DEPENDENCIES else None
+        
+        # 2. 加载机器人模型
+        robot_model = None
+        if args.robot_model and os.path.exists(args.robot_model):
+            with open(args.robot_model, 'r') as f:
+                robot_model = json.load(f)
+        
+        ik_solver = IKSolver(client, robot_model)
+        
+        # 3. 解析输入
+        if args.pose:
+            target_pose = [float(x) for x in args.pose.split()]
+            if len(target_pose) != 7:
+                print("错误: 位姿必须是7个数字 (x y z qx qy qz qw)")
+                return 1
+        elif args.pose_file:
+            with open(args.pose_file, 'r') as f:
+                data = json.load(f)
+            target_pose = data.get("pose", data.get("target_pose"))
+            if not target_pose:
+                print("错误: JSON文件中未找到位姿数据")
+                return 1
+        elif args.joints:
+            # 计算当前位置
+            joints = [float(x) for x in args.joints.split()]
+            print(f"当前关节: {joints}")
+            print("提示: 此功能需要正运动学模块")
+            return 0
+        else:
+            print("错误: 必须提供位姿输入")
+            return 1
+        
+        # 4. 解析种子
+        seed = None
+        if args.seed:
+            seed = [float(x) for x in args.seed.split()]
+            if args.verbose >= 1:
+                print(f"使用种子: {seed}")
+        
+        # 5. 使用统一接口求解
+        if args.verbose >= 1:
+            print(f"目标位姿: {target_pose}")
+            if args.object_id:
+                print(f"物体ID: {args.object_id}")
+            if args.save_to_cache:
+                print("缓存模式: 启用（通过求解器统一保存）")
+        
+        result = ik_solver.solve(
+            target_pose=target_pose,
+            seed=seed,
+            check_collision=args.check_collision,
+            object_id=args.object_id if args.object_id else None,
+        
+        )
+        
+        # 6. 缓存状态检查（已由求解器内部处理）
+        if args.save_to_cache:
+            cache_info = result.get("cache_info", {})
+            if cache_info.get("saved"):
+                if args.verbose >= 1:
+                    print(f"[缓存] 通过求解器自动保存完成")
+                    if cache_info.get("object_id"):
+                        print(f"      关联物体: {cache_info['object_id']}")
+                    if cache_info.get("cache_id"):
+                        print(f"      缓存ID: {cache_info['cache_id']}")
+            else:
+                if args.verbose >= 1:
+                    print(f"[缓存] 求解器未保存缓存")
+        
+        # 7. 输出结果
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print_result_human(result, args.verbose)
+        
+        return 0 if result["success"] else 1
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

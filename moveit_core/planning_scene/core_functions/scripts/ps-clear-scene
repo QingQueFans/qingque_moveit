@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""
+清空 PlanningScene - 简化版
+"""
+import sys
+import os
+import argparse
+
+# ========== 修改这里：添加正确的路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # scripts/
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)               # core_functions/
+SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
+
+# 添加 src 目录到 Python 路径
+sys.path.insert(0, SRC_DIR)
+
+# 现在可以正常导入
+from ps_core.scene_client import PlanningSceneClient
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="清空 PlanningScene",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  %(prog)s                    # 交互式清空
+  %(prog)s --yes              # 跳过确认，直接清空
+  %(prog)s --objects-only     # 只清空物体，保留机器人状态
+  %(prog)s --state-only       # 只清空机器人状态
+  %(prog)s --dry-run          # 显示将要清空的内容，不实际执行
+        """
+    )
+    
+    parser.add_argument('-y', '--yes', action='store_true',
+                       help='跳过确认提示')
+    parser.add_argument('--objects-only', action='store_true',
+                       help='只清空碰撞物体')
+    parser.add_argument('--state-only', action='store_true',
+                       help='只清空机器人状态')
+    parser.add_argument('--dry-run', '-d', action='store_true',
+                       help='干运行模式，不实际执行')
+    parser.add_argument('--force', '-f', action='store_true',
+                       help='强制清空，即使有附着物体')
+    
+    args = parser.parse_args()
+    
+    try:
+        # === 修改点1: 直接实例化，不用单例 ===
+        client = PlanningSceneClient()
+        
+        # 获取当前场景信息
+        scene = client.get_current_scene()
+        if not scene:
+            print("无法获取场景", file=sys.stderr)
+            return 1
+        
+        # 统计要清空的内容
+        objects_to_clear = 0
+        attached_to_clear = 0
+        
+        if scene.world and scene.world.collision_objects:
+            objects_to_clear = len(scene.world.collision_objects)
+        
+        if scene.robot_state and scene.robot_state.attached_collision_objects:
+            attached_to_clear = len(scene.robot_state.attached_collision_objects)
+        
+        has_robot_state = scene.robot_state is not None
+        
+        # 显示将要清空的内容
+        print("PlanningScene 清空操作")
+        print("=" * 60)
+        
+        if args.objects_only:
+            print("操作模式: 只清空碰撞物体")
+            if objects_to_clear > 0:
+                print(f"将清空 {objects_to_clear} 个碰撞物体")
+            else:
+                print("没有碰撞物体需要清空")
+                
+        elif args.state_only:
+            print("操作模式: 只清空机器人状态")
+            if has_robot_state:
+                print("将清空机器人状态")
+            else:
+                print("没有机器人状态需要清空")
+                
+        else:
+            print("操作模式: 完全清空")
+            if objects_to_clear > 0:
+                print(f"将清空 {objects_to_clear} 个碰撞物体")
+            if attached_to_clear > 0:
+                print(f"将清空 {attached_to_clear} 个附着物体")
+                if not args.force:
+                    print("⚠️  注意：有附着物体，使用 --force 强制清空")
+            if has_robot_state:
+                print("将重置机器人状态")
+        
+        print("=" * 60)
+        
+        if objects_to_clear == 0 and attached_to_clear == 0 and not has_robot_state:
+            print("场景已经是空的")
+            return 0
+        
+        if args.dry_run:
+            print("⏸️  干运行模式，未实际执行清空")
+            return 0
+        
+        # 确认提示
+        if not args.yes:
+            if attached_to_clear > 0 and not args.force:
+                print(f"\n⚠️  警告：有 {attached_to_clear} 个附着物体")
+                print("附着物体通常表示机器人正在抓取物体")
+                print("如果继续，这些物体可能会被意外移除")
+                print("\n使用 --force 强制清空附着物体")
+                return 1
+            
+            confirm = input("\n确认清空？(y/N): ")
+            if confirm.lower() != 'y':
+                print("取消操作")
+                return 0
+        
+        # 执行清空
+        print("\n正在清空场景...")
+        
+        if args.objects_only:
+            # 只清空物体
+            success = client.clear_all_objects()
+            if success:
+                print("✅ 碰撞物体已清空")
+            else:
+                print("❌ 清空碰撞物体失败")
+                return 1        
+        elif args.state_only:
+            # 只清空机器人状态
+            print("⚠️  只清空机器人状态功能待实现")
+            return 1
+            
+        else:
+            # 完全清空
+            success = client.clear_all_objects()
+            if success:
+                print("✅ 场景已完全清空")
+            else:
+                print("❌ 清空场景失败")
+                return 1
+        
+        # 验证结果
+        print("\n验证清空结果:")
+        scene_after = client.get_current_scene()
+        
+        objects_after = 0
+        if scene_after and scene_after.world and scene_after.world.collision_objects:
+            objects_after = len(scene_after.world.collision_objects)
+        
+        attached_after = 0
+        if scene_after and scene_after.robot_state and scene_after.robot_state.attached_collision_objects:
+            attached_after = len(scene_after.robot_state.attached_collision_objects)
+        
+        if objects_after == 0 and attached_after == 0:
+            print("✅ 验证通过：场景已清空")
+        else:
+            print(f"⚠️  验证警告：仍有 {objects_after} 个物体，{attached_after} 个附着物体")
+        # 在验证清空结果后添加：
+        print("正在刷新 RViz 显示...")
+
+        # 获取当前空场景并重新发布
+        scene_refresh = client.get_current_scene()
+        if scene_refresh:
+            scene_refresh.is_diff = True
+            # 通过主题发布，确保 RViz 更新
+            try:
+                # 如果 client 有场景发布器
+                if hasattr(client, 'scene_publisher'):
+                    client.scene_publisher.publish(scene_refresh)
+                    print("已通过主题发布场景更新")
+            except:
+                pass
+            
+            # 通过服务再次应用
+            client.apply_scene_update(scene_refresh)
+            print("已发送场景刷新")
+        return 0
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断", file=sys.stderr)
+        return 130
+    except Exception as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

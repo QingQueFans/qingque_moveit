@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""
+启动MoveIt控制器管理器
+"""
+import sys
+import os
+
+# ========== 设置路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+MODULE_SRC = os.path.join(MODULE_ROOT, 'src')
+
+sys.path.insert(0, MODULE_SRC)
+
+print(f"[控制器启动] 导入路径: {MODULE_SRC}")
+
+try:
+    from moveit_controller_manager import MoveItControllerManager  # ❗️改名！
+    import rclpy
+    HAS_DEPENDENCIES = True
+except ImportError as e:
+    print(f"[错误] 导入失败: {e}")
+    HAS_DEPENDENCIES = False
+
+def main():
+    if not HAS_DEPENDENCIES:
+        print("❌ 缺少依赖，无法启动")
+        return 1
+    
+    try:
+        rclpy.init()
+        controller_manager = MoveItControllerManager()
+        
+        print("✅ MoveIt控制器管理器已启动")
+        # 获取实际状态
+        status = controller_manager.get_controller_status()
+        print(f"   实际连接: {status.get('action_server', '未知')}")
+        print(f"   控制器: {status.get('controller', '未知')}")
+        print(f"   服务器就绪: {status.get('server_ready', False)}")
+        
+        rclpy.spin(controller_manager)
+        
+    except KeyboardInterrupt:
+        print("\n🛑 控制器管理器已停止")
+    except Exception as e:
+        print(f"❌ 错误: {e}")
+        return 1
+    finally:
+        controller_manager.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""
+kin-ik: 基本逆运动学求解脚本
+"""
+import sys
+import os
+import argparse
+import json
+import time
+import numpy as np
+
+# ========== 路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+# 计算 moveit_core 的根目录
+MOVEIT_CORE_ROOT = os.path.dirname(PROJECT_ROOT)  # 向上两级到 moveit_core
+print(f"MOVEIT_CORE_ROOT: {MOVEIT_CORE_ROOT}")
+
+# 正确设置 ps_core 的路径
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+IK_SRC = os.path.join(MODULE_ROOT, 'src')
+
+# 添加路径（注意顺序）
+sys.path.insert(0, IK_SRC)           # 1. 先添加逆运动学
+sys.path.insert(0, PLANNING_SCENE_SRC)  # 2. 添加规划场景
+
+
+
+try:
+    # 现在应该能正确导入了
+    from ps_core.scene_client import PlanningSceneClient
+    from kin_ik import IKSolver,IKConstraintHandler
+    HAS_DEPENDENCIES = True
+    print("✓ 成功导入所有依赖")
+except ImportError as e:
+    print(f"[警告] 导入依赖失败: {e}")
+    import traceback
+    traceback.print_exc()  # 打印完整的堆栈跟踪
+    HAS_DEPENDENCIES = False
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='带约束的逆运动学求解',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+约束类型:
+  --horizontal          末端保持水平
+  --vertical            末端保持垂直
+  --joint-limit ID MIN MAX  关节限制
+  --avoid-obstacle X Y Z RADIUS  避障约束
+
+示例:
+  kin-ik-constrained --pose "0.5 0.0 0.3 0 0 0 1" --horizontal
+  kin-ik-constrained --pose-file pose.json --vertical --joint-limit 2 -1.5 0
+        '''
+    )
+    
+    # 输入参数
+    parser.add_argument('--pose', type=str,
+                       help='目标位姿 (x y z qx qy qz qw)')
+    parser.add_argument('--pose-file', type=str,
+                       help='包含位姿的JSON文件')
+    parser.add_argument('--seed', type=str,
+                       help='初始种子')
+    
+    # 约束参数
+    parser.add_argument('--horizontal', action='store_true',
+                       help='末端保持水平约束')
+    parser.add_argument('--vertical', action='store_true',
+                       help='末端保持垂直约束')
+    
+    parser.add_argument('--joint-limit', nargs=3, action='append',
+                       metavar=('JOINT', 'MIN', 'MAX'),
+                       help='关节角度限制')
+    
+    parser.add_argument('--avoid-obstacle', nargs=4, action='append',
+                       metavar=('X', 'Y', 'Z', 'RADIUS'),
+                       help='避障约束')
+    
+    # 输出选项
+    parser.add_argument('--json', action='store_true',
+                       help='JSON输出格式')
+    parser.add_argument('--verbose', '-v', action='count', default=0)
+    
+    args = parser.parse_args()
+    
+    try:
+        # 检查输入
+        if not args.pose and not args.pose_file:
+            print("错误: 需要指定位姿")
+            return 1
+        
+        # 初始化
+        client = PlanningSceneClient() if HAS_DEPENDENCIES else None
+        ik_solver = IKSolver(client)
+        
+        # 创建约束处理器
+        constraint_handler = IKConstraintHandler()        # 添加约束
+        if args.horizontal:
+            constraint_handler.add_orientation_constraint("horizontal")
+            print("添加约束: 末端水平")
+        
+        if args.vertical:
+            constraint_handler.add_orientation_constraint("vertical")
+            print("添加约束: 末端垂直")
+        
+        if args.joint_limit:
+            for joint_limit in args.joint_limit:
+                joint_idx = int(joint_limit[0])
+                min_angle = float(joint_limit[1])
+                max_angle = float(joint_limit[2])
+                constraint_handler.add_joint_constraint(
+                    joint_idx, min_angle, max_angle)
+                print(f"添加约束: 关节{joint_idx}限制 [{min_angle}, {max_angle}]")
+        
+        if args.avoid_obstacle:
+            for obs in args.avoid_obstacle:
+                position = [float(obs[0]), float(obs[1]), float(obs[2])]
+                radius = float(obs[3])
+                constraint_handler.add_avoidance_constraint(position, radius)
+                print(f"添加约束: 避障 {position} 半径{radius}")
+        
+        # 设置约束处理器
+        ik_solver.set_constraint_handler(constraint_handler)
+        
+        # 解析位姿
+        if args.pose_file:
+            with open(args.pose_file, 'r') as f:
+                data = json.load(f)
+            target_pose = data.get("pose")
+        else:
+            target_pose = [float(x) for x in args.pose.split()]
+            if len(target_pose) != 7:
+                print("错误: 需要7个数字")
+                return 1
+        
+        # 解析种子
+        seed = None
+        if args.seed:
+            seed = [float(x) for x in args.seed.split()]
+        
+        # 求解带约束的IK
+        result = ik_solver.solve_with_constraints(target_pose, seed)
+        
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print(f"\n求解结果:")
+            print(f"  成功: {'✓' if result['success'] else '✗'}")
+            
+            if result["success"]:
+                print(f"  关节角度: {result['solution']}")
+                print(f"  约束满足: {'✓' if result.get('constraints_satisfied', False) else '✗'}")
+                
+                if "constraints" in result:
+                    constraints = result["constraints"]
+                    print(f"\n  约束评估:")
+                    print(f"    总误差: {constraints['total_error']:.6f}")
+                    print(f"    硬约束满足: {constraints['hard_constraints_satisfied']}")
+                    
+                    if args.verbose >= 1:
+                        for i, c in enumerate(constraints["constraints"]):
+                            status = "✓" if c["satisfied"] else "✗"
+                            print(f"    约束{i}: {c['type']}.{c['subtype']} {status}")
+        
+        return 0 if result["success"] else 1
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""
+获取接触点信息
+"""
+import sys
+import os
+import argparse
+import json
+import time
+sys.path.append(os.path.expanduser('~/qingfu_moveit/moveit_core/planning_scene'))
+
+# ========== 设置路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
+sys.path.insert(0, CORE_SRC)
+
+DETECTION_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, DETECTION_SRC)
+
+OBJ_MODULE_ROOT = os.path.join(PROJECT_ROOT, 'collision_objects')
+OBJ_SRC = os.path.join(OBJ_MODULE_ROOT, 'src')
+sys.path.insert(0, OBJ_SRC)
+
+from ps_core.scene_client import PlanningSceneClient
+from ps_collision.contact_analyzer import ContactAnalyzer
+from ps_collision.collision_checker import CollisionChecker
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="获取和分析接触点信息",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 分析两个物体的接触
+  %(prog)s --objects "gripper" "object"
+  
+  # 分析抓取接触
+  %(prog)s --grasp "gripper" "target_object"
+  
+  # 获取场景中所有接触
+  %(prog)s --all
+  
+  # 从文件读取物体对
+  %(prog)s --from-file contact_pairs.txt
+  
+  # JSON格式输出
+  %(prog)s --objects "box1" "box2" --json
+        """
+    )
+    
+    # 分析模式
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument('--objects', '-o', type=str, nargs=2,
+                          help='分析两个物体的接触')
+    mode_group.add_argument('--grasp', '-g', type=str, nargs=2,
+                          help='分析抓取接触')
+    mode_group.add_argument('--all', '-a', action='store_true',
+                          help='获取场景中所有接触')
+    mode_group.add_argument('--from-file', '-f', type=str,
+                          help='从文件读取接触对列表')
+    
+    # 输出选项
+    parser.add_argument('--json', '-j', action='store_true',
+                       help='JSON格式输出')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='详细输出')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='安静模式')
+    
+    args = parser.parse_args()
+    
+    try:
+        # 初始化
+        client = PlanningSceneClient()
+        analyzer = ContactAnalyzer(client)
+        checker = CollisionChecker(client)
+        
+        results = {}
+        
+        if args.objects:
+            # 分析两个物体的接触
+            obj1, obj2 = args.objects
+            contact_info = analyzer.analyze_contacts(obj1, obj2)
+            
+            if "error" in contact_info:
+                results = {"error": contact_info["error"]}
+            else:
+                results = {
+                    "analysis_type": "contact_analysis",
+                    "object1": obj1,
+                    "object2": obj2,
+                    "result": contact_info
+                }
+                
+        elif args.grasp:
+            # 分析抓取接触
+            gripper, target = args.grasp
+            grasp_info = analyzer.analyze_grasp_contacts(gripper, target)
+            
+            if "error" in grasp_info:
+                results = {"error": grasp_info["error"]}
+            else:
+                results = {
+                    "analysis_type": "grasp_analysis",
+                    "gripper": gripper,
+                    "target": target,
+                    "result": grasp_info
+                }
+                
+        elif args.all:
+            # 获取所有接触
+            all_contacts = analyzer.get_all_contacts()
+            
+            if "error" in all_contacts:
+                results = {"error": all_contacts["error"]}
+            else:
+                results = {
+                    "analysis_type": "all_contacts",
+                    "result": all_contacts
+                }
+                
+        elif args.from_file:
+            # 从文件读取接触对
+            with open(args.from_file, 'r') as f:
+                lines = [line.strip() for line in f if line.strip()]
+            
+            contact_pairs = []
+            for line in lines:
+                if ',' in line:
+                    parts = [p.strip() for p in line.split(',')]
+                    if len(parts) >= 2:
+                        contact_pairs.append((parts[0], parts[1]))
+                else:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        contact_pairs.append((parts[0], parts[1]))
+            
+            if not contact_pairs:
+                print("错误：文件中没有有效的接触对")
+                return 1            
+            # 分析每个接触对
+            analysis_results = []
+            for obj1, obj2 in contact_pairs:
+                contact_info = analyzer.analyze_contacts(obj1, obj2)
+                analysis_results.append({
+                    "object1": obj1,
+                    "object2": obj2,
+                    "analysis": contact_info
+                })
+            
+            results = {
+                "analysis_type": "batch_contact_analysis",
+                "file": args.from_file,
+                "contact_pairs_count": len(contact_pairs),
+                "results": analysis_results
+            }
+        
+        # 输出结果
+        if args.json:
+            print(json.dumps(results, indent=2))
+        elif not args.quiet:
+            _print_human_readable(results, args.verbose)
+        
+        return 0
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+def _print_human_readable(results, verbose=False):
+    """打印人类可读的结果"""
+    print("\n接触分析结果:")
+    print("=" * 60)
+    
+    if "error" in results:
+        print(f"❌ 错误: {results['error']}")
+        return
+    
+    analysis_type = results.get("analysis_type", "unknown")
+    
+    if analysis_type == "contact_analysis":
+        contact_info = results["result"]
+        obj1 = results["object1"]
+        obj2 = results["object2"]
+        
+        print(f"物体对: {obj1} ↔ {obj2}")
+        
+        if contact_info["contact"]:
+            print(f"接触状态: ✅ 接触")
+            print(f"接触类型: {contact_info['contact_type']}")
+            print(f"估计接触面积: {contact_info['estimated_contact_area']:.6f} m²")
+            print(f"力方向: {contact_info['force_direction']}")
+            
+            if verbose:
+                print(f"\n分析: {contact_info.get('analysis', '')}")
+                
+                if "collision_details" in contact_info:
+                    details = contact_info["collision_details"]
+                    print(f"\n碰撞详情:")
+                    for key, value in details.items():
+                        if isinstance(value, (int, float)):
+                            print(f"  {key}: {value:.4f}")
+                        else:
+                            print(f"  {key}: {value}")
+        else:
+            print(f"接触状态: ⚠️  未接触")
+            print(f"信息: {contact_info.get('message', '')}")
+            
+    elif analysis_type == "grasp_analysis":
+        grasp_info = results["result"]
+        gripper = results["gripper"]
+        target = results["target"]
+        
+        print(f"抓取分析: {gripper} → {target}")
+        
+        if grasp_info["contact"]:
+            print(f"接触状态: ✅ 接触")
+            print(f"抓取质量: {grasp_info['grasp_quality']:.2%}")
+            print(f"抓取稳定性: {'✅ 稳定' if grasp_info['grasp_stable'] else '❌ 不稳定'}")
+            print(f"接触类型: {grasp_info['contact_type']}")
+            print(f"建议: {grasp_info['recommendation']}")
+            
+            if verbose:
+                print(f"\n详细分析:")
+                print(f"  接触面积: {grasp_info['estimated_contact_area']:.6f} m²")
+                print(f"  力方向: {grasp_info['force_direction']}")
+                print(f"  分析: {grasp_info.get('analysis', '')}")
+        else:
+            print(f"接触状态: ⚠️  未接触")
+            print(f"建议: {grasp_info.get('recommendation', '无法抓取')}")
+            
+    elif analysis_type == "all_contacts":
+        all_contacts = results["result"]
+        total_objects = all_contacts["total_objects"]
+        total_contacts = all_contacts["total_contacts"]
+        
+        print(f"场景物体数: {total_objects}")
+        print(f"接触对数量: {total_contacts}")
+        
+        if total_contacts > 0:
+            print(f"\n接触对详情:")
+            for i, contact in enumerate(all_contacts["contacts"], 1):
+                obj1 = contact["object1"]
+                obj2 = contact["object2"]
+                contact_type = contact["contact_type"]
+                
+                print(f"{i:2d}. {obj1:15s} ↔ {obj2:15s} 类型: {contact_type}")
+                
+                if verbose:
+                    print(f"     接触面积: {contact['estimated_contact_area']:.6f} m²")
+                    print(f"     力方向: {contact['force_direction']}")
+        else:
+            print(f"\n✅ 场景中没有接触")    
+
+    elif analysis_type == "batch_contact_analysis":
+        analysis_results = results["results"]
+        pair_count = results["contact_pairs_count"]
+        
+        print(f"分析接触对数: {pair_count}")
+        print(f"文件: {results['file']}")
+        
+        contact_count = 0
+        for i, result in enumerate(analysis_results, 1):
+            obj1 = result["object1"]
+            obj2 = result["object2"]
+            analysis = result["analysis"]
+            
+            if "error" in analysis:
+                status = f"❌ 错误: {analysis['error']}"
+            elif analysis.get("contact", False):
+                status = f"✅ 接触 ({analysis['contact_type']})"
+                contact_count += 1
+            else:
+                status = "⚠️  未接触"
+            
+            print(f"{i:2d}. {obj1:15s} ↔ {obj2:15s} {status}")
+            
+            if verbose and "error" not in analysis and analysis.get("contact", False):
+                print(f"     面积: {analysis['estimated_contact_area']:.6f} m²")
+                print(f"     质量: {analysis.get('grasp_quality', 'N/A')}")
+        
+        print(f"\n汇总: {contact_count}/{pair_count} 对物体接触")
+    
+    print(f"\n分析时间: {results.get('result', {}).get('timestamp', '未知')}")
+
+if __name__ == "__main__":
+    sys.exit(main())

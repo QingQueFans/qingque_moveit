@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""
+ros-start-execution: 轨迹执行主脚本
+基于已测试成功的版本，现在使用本地控制器管理器
+"""
+import sys
+import os
+import argparse
+import json
+import time
+import numpy as np
+
+# ========== 路径设置（保留成功版本）==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+# 找到moveit_ros根目录（关键：保留之前的成功逻辑）
+current_dir = os.path.dirname(PROJECT_ROOT)
+while current_dir:
+    dir_name = os.path.basename(current_dir)
+    if dir_name == 'moveit_ros':
+        MOVEIT_ROS_ROOT = current_dir
+        MOVEIT_CORE_ROOT = os.path.join(os.path.dirname(current_dir), 'moveit_core')
+        MOVEIT_PLUGINS_ROOT = os.path.join(os.path.dirname(current_dir), 'moveit_plugins')
+        break
+    current_dir = os.path.dirname(current_dir)
+
+# 设置路径（现在使用本地模块）
+TRAJECTORY_EXECUTION_SRC = os.path.join(MODULE_ROOT, 'src')
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+
+sys.path.insert(0, TRAJECTORY_EXECUTION_SRC)
+sys.path.insert(0, PLANNING_SCENE_SRC)
+
+print(f"[轨迹执行] 路径设置:")
+print(f"  当前模块: {TRAJECTORY_EXECUTION_SRC}")
+print(f"  规划场景: {PLANNING_SCENE_SRC}")
+
+# ========== 导入检查 ==========
+try:
+    from ps_core.scene_client import PlanningSceneClient
+    from trajectory_execution import TrajectoryExecutionManager
+    import rclpy
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+    HAS_DEPENDENCIES = True
+    print("✅ 所有依赖导入成功")
+except ImportError as e:
+    print(f"❌ 导入依赖失败: {e}")
+    HAS_DEPENDENCIES = False
+    sys.exit(1)
+
+# ========== 轨迹生成函数（保留成功版本）==========
+def create_panda_trajectory(points_count=3, velocities=None):
+    """创建Panda机械臂的测试轨迹（已测试成功）"""
+    trajectory = JointTrajectory()
+    
+    # Panda机械臂的关节名（已验证正确）
+    trajectory.joint_names = [
+        'panda_joint1', 'panda_joint2', 'panda_joint3',
+        'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7'
+    ]
+    
+    # 生成轨迹点（使用已验证的安全范围）
+    for i in range(points_count):
+        point = JointTrajectoryPoint()
+        
+        # 已测试的安全范围：-1.5到1.5弧度
+        point.positions = np.random.uniform(-1.5, 1.5, 7).tolist()        # 速度（可选）
+        if velocities:
+            point.velocities = velocities
+        else:
+            point.velocities = np.random.uniform(-0.3, 0.3, 7).tolist()
+        
+        # 时间（已验证的格式）
+        point.time_from_start.sec = i + 1
+        point.time_from_start.nanosec = 0
+        
+        trajectory.points.append(point)
+    
+    print(f"[轨迹生成] 创建了 {len(trajectory.points)} 个轨迹点")
+    print(f"[轨迹生成] 关节: {trajectory.joint_names[:3]}...")
+    
+    return trajectory
+
+def create_zero_trajectory():
+    """创建零位置轨迹（最安全，已测试成功）"""
+    trajectory = JointTrajectory()
+    
+    trajectory.joint_names = [
+        'panda_joint1', 'panda_joint2', 'panda_joint3',
+        'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7'
+    ]
+    
+    point = JointTrajectoryPoint()
+    point.positions = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    point.time_from_start.sec = 2
+    trajectory.points.append(point)
+    
+    print("[轨迹生成] 创建零位置轨迹")
+    return trajectory
+
+# ========== 结果输出函数（保留成功版本）==========
+def print_result(result, verbose=0, json_output=False):
+    """格式化输出结果（已验证能正确显示）"""
+    if json_output:
+        print(json.dumps(result, indent=2, default=str))
+        return
+    
+    print("\n" + "="*60)
+    print("轨迹执行结果")
+    print("="*60)
+    
+    if not result:
+        print("❌ 结果为空")
+        return
+    
+    success = result.get("success", False)
+    
+    if success:
+        print("✅ 执行成功")
+        print(f"  结果: {result.get('result', 'N/A')}")
+        print(f"  执行时间: {result.get('execution_time', 0):.3f}秒")
+        print(f"  方法: {result.get('method', 'unknown')}")
+        
+        if 'error_code' in result:
+            print(f"  错误代码: {result['error_code']}")
+        
+        if verbose >= 1:
+            print("\n详细结果:")
+            for key, value in result.items():
+                if key not in ["success", "timestamp"]:
+                    print(f"  {key}: {value}")
+    else:
+        print("❌ 执行失败")
+        print(f"  错误: {result.get('error', '未知错误')}")
+        
+        if 'error_code' in result:
+            print(f"  错误代码: {result['error_code']}")
+    
+    if 'timestamp' in result:
+        print(f"  时间: {result['timestamp']}")
+    
+    print("="*60)
+
+# ========== 核心执行函数（保留成功的同步模式）==========
+def execute_synchronously(args):
+    """
+    同步执行函数 - 已验证能避免异步死锁
+    """
+    print("\n🔧 使用同步执行模式")
+    
+    try:
+        # 初始化ROS（已测试成功的逻辑）
+        if not rclpy.ok():
+            rclpy.init(args=sys.argv)
+        
+        # 创建规划场景客户端（成功使用过）
+        scene_client = None
+        if not args.no_ros:
+            try:
+                scene_client = PlanningSceneClient()
+                print("✅ 创建PlanningSceneClient成功")
+            except Exception as e:
+                print(f"⚠️ 创建PlanningSceneClient失败: {e}")
+                if not args.no_ros:
+                    return {"success": False, "error": f"PlanningSceneClient失败: {e}"}
+        
+        # 创建轨迹执行管理器（现在使用本地模块）
+        print("🔧 创建轨迹执行管理器...")
+        if args.no_ros:
+            executor = TrajectoryExecutionManager(None, use_controller_plugin=False)
+        else:
+            # 关键：现在使用本地的控制器管理器
+            executor = TrajectoryExecutionManager(scene_client, use_controller_plugin=True)
+        
+        # 配置执行参数（保留成功配置）
+        config_update = {}
+        if args.velocity != 1.0:
+            config_update["max_velocity_scaling"] = args.velocity
+        if args.acceleration != 1.0:
+            config_update["max_acceleration_scaling"] = args.acceleration
+        
+        if config_update:
+            executor.set_config(config_update)        # 处理不同命令（保留成功逻辑）
+        if args.stop:
+            print("🛑 停止当前执行...")
+            result = executor.stop()
+        
+        elif args.status:
+            print("📊 检查执行状态...")
+            result = executor.get_execution_status()
+        
+        elif args.config:
+            print("⚙️ 查看执行配置...")
+            result = executor.get_config()
+        
+        elif args.history:
+            print(f"📜 显示执行历史 (最近{args.history}条)...")
+            result = executor.get_execution_history(args.history)
+        
+        else:
+            # 创建轨迹（使用已验证的函数）
+            if args.zero:
+                print("🎯 创建零位置轨迹")
+                trajectory = create_zero_trajectory()
+            else:
+                print(f"🎯 创建测试轨迹 ({args.points} 个点)")
+                trajectory = create_panda_trajectory(points_count=args.points)
+            
+            # 执行轨迹 - 使用同步方法（已验证成功）
+            print("🚀 开始执行轨迹...")
+            start_time = time.time()
+            
+            # 🔥 关键：使用已验证的同步执行方法
+            result = executor.execute_sync(trajectory, wait=True)
+            
+            # 添加总耗时
+            result["total_elapsed_time"] = time.time() - start_time
+        
+        # 清理资源
+        executor.destroy()
+        
+        return result
+        
+    except KeyboardInterrupt:
+        print("\n⏹️ 操作被用户中断")
+        return {"success": False, "error": "用户中断"}
+    except Exception as e:
+        print(f"❌ 执行异常: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+# ========== 主函数（保留成功参数解析）==========
+def main():
+    parser = argparse.ArgumentParser(
+        description='轨迹执行工具 - 稳定版',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+示例:
+  ros-start-execution                    # 默认3点轨迹
+  ros-start-execution --points 1         # 1点轨迹
+  ros-start-execution --zero             # 零位置轨迹
+  ros-start-execution --velocity 0.5     # 半速执行
+  ros-start-execution --no-ros           # 模拟模式
+  ros-start-execution --status           # 查看状态
+        '''
+    )
+    
+    # 轨迹参数（已验证的参数）
+    parser.add_argument('--points', '-p', type=int, default=3,
+                       help='轨迹点数 (默认: 3)')
+    parser.add_argument('--zero', '-z', action='store_true',
+                       help='使用零位置轨迹')
+    parser.add_argument('--velocity', type=float, default=1.0,
+                       help='速度缩放因子 (默认: 1.0)')
+    parser.add_argument('--acceleration', type=float, default=1.0,
+                       help='加速度缩放因子 (默认: 1.0)')
+    
+    # 控制命令
+    parser.add_argument('--stop', action='store_true',
+                       help='停止当前执行')
+    parser.add_argument('--status', '-s', action='store_true',
+                       help='查看执行状态')
+    parser.add_argument('--config', action='store_true',
+                       help='查看配置')
+    parser.add_argument('--history', type=int,
+                       help='查看历史记录')
+    
+    # 输出选项
+    parser.add_argument('--output', '-o', type=str,
+                       help='保存结果到文件')
+    parser.add_argument('--json', '-j', action='store_true',
+                       help='JSON格式输出')
+    parser.add_argument('--verbose', '-v', action='count', default=0,
+                       help='详细输出')    # 运行模式
+    parser.add_argument('--no-ros', action='store_true',
+                       help='模拟模式 (不连接ROS)')
+    parser.add_argument('--sync', action='store_true',
+                       help='强制使用同步模式 (默认已启用)')
+    
+    args = parser.parse_args()
+    
+    # 检查依赖（关键检查）
+    if not HAS_DEPENDENCIES and not args.no_ros:
+        print("❌ 缺少必要依赖")
+        return 1
+    
+    print(f"\n{'='*60}")
+    print(f"轨迹执行器 - 启动")
+    print(f"{'='*60}")
+    print(f"模式: {'模拟' if args.no_ros else '真实控制器'}")
+    print(f"轨迹: {'零位置' if args.zero else f'{args.points}点'}")
+    if args.velocity != 1.0 or args.acceleration != 1.0:
+        print(f"速度: {args.velocity:.1f}x, 加速度: {args.acceleration:.1f}x")
+    print(f"{'='*60}")
+    
+    try:
+        # 使用同步执行（已验证成功）
+        result = execute_synchronously(args)
+        
+        # 输出结果
+        if args.output and result:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                json.dump(result, f, indent=2, default=str)
+            print(f"\n📁 结果已保存到: {args.output}")
+        
+        # 显示结果
+        print_result(result, verbose=args.verbose, json_output=args.json)
+        
+        # 返回退出码
+        return 0 if result.get('success', False) else 1
+        
+    except KeyboardInterrupt:
+        print("\n\n⏹️ 程序被用户中断")
+        return 130
+    except Exception as e:
+        print(f"\n❌ 程序异常: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

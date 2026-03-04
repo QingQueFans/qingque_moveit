@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""
+物体检测命令行工具
+直接从缓存或场景检测物体
+"""
+import sys
+import os
+import json
+import argparse
+import time
+
+# ========== 路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+# 添加路径（根据您的项目结构调整）
+MOVEIT_CORE_ROOT = os.path.join(PROJECT_ROOT, '..', '..', 'moveit_core')
+
+CORE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+OBJ_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'collision_objects', 'src')
+CACHE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'cache_manager', 'src')
+DETECTOR_SRC = os.path.join(MODULE_ROOT, 'src')
+
+
+sys.path.insert(0, CACHE_SRC)
+sys.path.insert(0, OBJ_SRC)
+sys.path.insert(0, CORE_SRC)
+sys.path.insert(0, DETECTOR_SRC)  # 插入到路径列表的最前面
+
+try:
+    from ps_core.scene_client import PlanningSceneClient
+    from ps_objects.object_manager import ObjectManager
+    from ps_cache import CachePathTools,ObjectCache
+    from object_detection import PureObjectDetector  # 根据实际路径调整
+    HAS_DEPENDENCIES = True
+    print("[物体检测] ✓ 依赖导入成功")
+    
+except ImportError as e:
+    print(f"[物体检测] ✗ 依赖导入失败: {e}")
+    HAS_DEPENDENCIES = False
+
+
+class SimpleObjectDetectorCLI:
+    """简单物体检测器命令行版"""
+    
+    def __init__(self):
+        if not HAS_DEPENDENCIES:
+            print("错误：缺少必要依赖")
+            sys.exit(1)
+        
+        # 初始化缓存
+        CachePathTools.initialize()
+        self.object_cache = ObjectCache()
+        
+        # 尝试连接场景
+        try:
+            self.client = PlanningSceneClient()
+            self.object_manager = ObjectManager(self.client)
+            print("[物体检测] ✓ 连接到规划场景")
+        except:
+            self.client = None
+            self.object_manager = None
+            
+            print("[物体检测] ⚠️ 无法连接到规划场景，仅使用缓存模式")
+        self.pure_detector = PureObjectDetector(self.client, self.object_manager)
+    def detect_from_cache(self, scene_id=None):
+        """从缓存检测物体 - 使用 PureObjectDetector"""
+        try:
+            # 直接调用 PureObjectDetector 的方法
+            result = self.pure_detector.detect_from_cache(scene_id)
+            
+            # 或者调用 detect 方法指定只使用缓存
+            # result = self.pure_detector.detect(use_cache=True, scene_id=scene_id)
+            
+            return result
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+    def detect_from_scene(self):
+        """从规划场景检测物体"""
+        try:
+            if not self.object_manager:
+                return {
+                    "success": False,
+                    "error": "未连接到规划场景",
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                }            # 从场景获取物体
+            objects = []
+            if hasattr(self.object_manager, 'list_objects'):
+                obj_ids = self.object_manager.list_objects()
+                
+                for obj_id in obj_ids:
+                    obj_data = self._extract_object_info(obj_id)
+                    if obj_data:
+                        objects.append(obj_data)
+            
+            return {
+                "success": True,
+                "source": "scene",
+                "count": len(objects),
+                "objects": objects,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+    
+    def _extract_object_info(self, object_id):
+        """提取物体信息"""
+        try:
+            # 先尝试从缓存获取
+            cached = self.object_cache.load_object_info(object_id, "box")
+            if cached and "data" in cached:
+                return cached["data"]
+            
+            # 如果没有缓存，创建基础信息
+            return {
+                "id": object_id,
+                "type": "unknown",
+                "position": [0.5, 0.0, 0.2],
+                "dimensions": [0.1, 0.1, 0.1],
+                "orientation": [0.0, 0.0, 0.0, 1.0],
+                "confidence": 1.0,
+                "source": "scene"
+            }
+            
+        except Exception as e:
+            print(f"[信息提取] 错误 {object_id}: {e}")
+            return None
+    
+    def get_object(self, object_id):
+        """获取单个物体"""
+        try:
+            # 从缓存获取
+            cached = self.object_cache.load_object_info(object_id, "box")
+            if cached and "data" in cached:
+                return {
+                    "success": True,
+                    "object": cached["data"],
+                    "source": "cache",
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                }
+            
+            # 从场景获取
+            if self.object_manager:
+                obj_data = self._extract_object_info(object_id)
+                if obj_data:
+                    return {
+                        "success": True,
+                        "object": obj_data,
+                        "source": "scene",
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                    }
+            
+            return {
+                "success": False,
+                "error": f"未找到物体: {object_id}",
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+def print_human_readable(result, verbose=False):
+    """
+    安全的人性化输出 - 处理所有类型的结果
+    """
+    # ========== 处理布尔值 ==========
+    if isinstance(result, bool):
+        print("✅ 操作成功" if result else "❌ 操作失败")
+        return
+    
+    # ========== 处理字符串 ==========
+    if isinstance(result, str):
+        print(result)
+        return
+    
+    # ========== 处理字典 ==========
+    if not isinstance(result, dict):
+        print(f"⚠️  未知结果类型: {type(result)}")
+        print(f"   值: {result}")
+        return
+    
+    # 检查是否成功
+    if not result.get("success", False):
+        error_msg = result.get("error", "未知错误")
+        print(f"❌ 操作失败: {error_msg}")
+        return
+    
+    # ========== 根据内容类型输出 ==========
+    
+    # 1. 缓存统计结果
+    if "stats" in result:
+        stats = result["stats"]
+        print("=== 缓存统计 ===")
+        print(f"缓存目录: {stats.get('cache_directory', '未知')}")
+        print(f"文件数量: {stats.get('file_count', 0)}")
+        print(f"总大小: {stats.get('total_size_mb', 0)} MB")
+        
+        if verbose and "files" in stats:
+            print("\n缓存文件:")
+            for i, file in enumerate(stats["files"][:5]):  # 最多显示5个
+                print(f"  {i+1}. {os.path.basename(file)}")
+        
+        return
+    
+    # 2. 单个物体结果
+    if "object" in result:
+        obj = result["object"]
+        source = result.get("source", "未知")
+        
+        print(f"✅ 物体: {obj.get('id', '未知')} (来源: {source})")
+        print(f"   类型: {obj.get('type', '未知')}")
+        print(f"   位置: {obj.get('position', [0,0,0])}")
+        
+        if verbose:
+            if "dimensions" in obj:
+                print(f"   尺寸: {obj['dimensions']}")
+            if "orientation" in obj:
+                print(f"   方向: {obj['orientation']}")
+            if "confidence" in obj:
+                print(f"   置信度: {obj['confidence']:.2f}")
+        
+        return
+    
+    # 3. 多个物体结果
+    if "objects" in result:
+        objects = result["objects"]
+        source = result.get("source", "未知")
+        mode = result.get("mode", "普通")
+        
+        if mode == "hybrid":
+            print(f"=== 混合检测结果 ===")
+            print(f"场景物体: {result.get('scene_count', 0)} 个")
+            print(f"缓存物体: {result.get('cache_count', 0)} 个")
+            print(f"总计: {result.get('total_count', len(objects))} 个物体")
+        else:
+            print(f"=== 检测结果 ({mode}) ===")
+            print(f"物体数量: {len(objects)} 个 (来源: {source})")
+        
+        print(f"检测时间: {result.get('timestamp', '未知')}")
+        
+        # 显示物体列表
+        if objects:
+            print("\n物体列表:")
+            for i, obj in enumerate(objects[:10]):  # 最多显示10个
+                obj_id = obj.get('id', f'object_{i}')
+                obj_type = obj.get('type', '未知')
+                position = obj.get('position', [])
+                source_mark = "[C]" if obj.get("source") == "cache_only" else "[S]"
+                
+                print(f"  {i+1:2d}. {source_mark} {obj_id}: {obj_type} at {position}")
+                
+                if verbose:
+                    if "dimensions" in obj:
+                        print(f"      尺寸: {obj['dimensions']}")
+            
+            if len(objects) > 10:
+                print(f"  ... 还有 {len(objects) - 10} 个物体")
+        else:
+            print("⚠️  未检测到任何物体")
+        
+        return
+    
+    # 4. 其他字典结果
+    print("=== 操作结果 ===")
+    for key, value in result.items():
+        if key not in ["success", "timestamp"]:  # 跳过已处理的
+            if isinstance(value, (list, dict)):
+                print(f"{key}: {type(value).__name__} ({len(value) if hasattr(value, '__len__') else 'N/A'})")
+            else:
+                print(f"{key}: {value}")
+    
+    print(f"时间: {result.get('timestamp', '未知')}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='物体检测工具 - 支持场景/缓存/混合检测',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用示例:
+  %(prog)s --list                      # 混合检测（默认）
+  %(prog)s --hybrid                    # 显式指定混合检测
+  %(prog)s --scene-only                # 只检测场景物体
+  %(prog)s --cache-only                # 只检测缓存物体
+  %(prog)s --object cube_1             # 获取单个物体
+  %(prog)s --cache-stats               # 缓存统计
+  %(prog)s --json                      # JSON格式输出
+  %(prog)s --verbose                   # 详细输出
+        """
+    )
+    
+    # 检测模式
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument('--list', action='store_true', 
+                           help='列出所有物体（默认混合模式）')
+    mode_group.add_argument('--object', type=str, metavar='ID',
+                           help='获取指定物体')
+    mode_group.add_argument('--scene-only', action='store_true',
+                           help='只从场景检测（忽略缓存）')
+    mode_group.add_argument('--cache-only', action='store_true',
+                           help='只从缓存检测（忽略场景）')
+    mode_group.add_argument('--hybrid', action='store_true',
+                           help='混合检测（场景+缓存，默认）')
+    
+    # 实用选项
+    parser.add_argument('--cache-stats', action='store_true',
+                       help='显示缓存统计信息')
+    parser.add_argument('--json', action='store_true',
+                       help='JSON格式输出')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='详细输出')
+    parser.add_argument('--scene-id', type=str,
+                       help='场景ID（用于缓存过滤）')
+    
+    args = parser.parse_args()    # 创建检测器
+    detector = SimpleObjectDetectorCLI()
+    
+    try:
+        result = None
+        
+        # ========== 根据模式执行检测 ==========
+        
+        if args.cache_stats:
+            # 缓存统计
+            result = detector.get_cache_stats()
+            
+        elif args.object:
+            # 获取单个物体
+            result = detector.get_object(args.object)
+            
+        elif args.scene_only:
+            # 只检测场景
+            print("[模式] 场景检测模式")
+            result = detector.detect_from_scene()
+            
+        elif args.cache_only:
+            # 只检测缓存
+            print("[模式] 缓存检测模式")
+            result = detector.detect_from_cache(args.scene_id)
+            
+        elif args.hybrid or args.list or (not any([args.scene_only, args.cache_only, args.object, args.cache_stats])):
+            # 混合检测（默认）
+            print("[模式] 混合检测模式")
+            
+            scene_result = detector.detect_from_scene()
+            cache_result = detector.detect_from_cache(args.scene_id)
+            
+            # 合并结果
+            all_objects = []
+            seen_ids = set()
+            
+            # 先添加场景物体
+            if scene_result.get("success") and scene_result.get("count", 0) > 0:
+                for obj in scene_result.get("objects", []):
+                    obj_id = obj.get("id")
+                    if obj_id and obj_id not in seen_ids:
+                        all_objects.append(obj)
+                        seen_ids.add(obj_id)
+            
+            # 再添加缓存物体（去重）
+            if cache_result.get("success") and cache_result.get("count", 0) > 0:
+                for obj in cache_result.get("objects", []):
+                    obj_id = obj.get("id")
+                    if obj_id and obj_id not in seen_ids:
+                        obj["source"] = "cache_only"  # 标记为仅缓存
+                        all_objects.append(obj)
+                        seen_ids.add(obj_id)
+            
+            result = {
+                "success": True,
+                "mode": "hybrid",
+                "scene_count": scene_result.get("count", 0),
+                "cache_count": cache_result.get("count", 0),
+                "total_count": len(all_objects),
+                "objects": all_objects,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+        
+        # ========== 输出结果 ==========
+        
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+            
+        else:
+            if result.get("success", False):
+                # 格式化输出
+                print_human_readable(result, args.verbose)
+            else:
+                print(f"❌ 检测失败: {result.get('error', '未知错误')}")
+                
+        return 0 if result.get("success", False) else 1
+        
+    except Exception as e:
+        print(f"❌ 程序错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+# ... 所有函数定义 ...
+
+if __name__ == "__main__":
+    sys.exit(main())  # ⚠️ 必须要有这行！    

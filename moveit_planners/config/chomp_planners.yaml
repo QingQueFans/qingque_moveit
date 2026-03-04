@@ -1,0 +1,37 @@
+# CHOMP规划器配置
+# 梯度优化规划器
+
+configurations:
+  # 默认配置 - 平衡速度和精度
+  default:
+    optimization:
+      max_iterations: 200      # 最大优化迭代次数
+      learning_rate: 0.01      # 学习率
+      smoothness_cost_weight: 0.1   # 平滑性权重
+      obstacle_cost_weight: 1.0     # 障碍物权重
+    
+    collision:
+      clearance: 0.2           # 安全距离
+      threshold: 0.07          # 碰撞阈值
+    
+    trajectory:
+      smoothness_cost_velocity: 0.0
+      smoothness_cost_acceleration: 1.0
+  
+  # 快速配置 - 优先速度
+  fast:
+    optimization:
+      max_iterations: 50
+      learning_rate: 0.05
+    
+    collision:
+      clearance: 0.15
+  
+  # 精确配置 - 优先质量  
+  precise:
+    optimization:
+      max_iterations: 500
+      learning_rate: 0.005
+
+# 默认使用哪个配置
+default_configuration: default

@@ -1,0 +1,29 @@
+# LMA专用ML配置
+lma_model:
+  # 数据收集
+  collection:
+    max_samples: 300           # LMA样本上限
+    auto_train_frequency: 10   # 每10个样本自动训练
+    quality_threshold: 100     # 收集阈值(mm)
+    
+  # 模型训练
+  training:
+    min_samples: 5              # 最小训练样本
+    model_type: "ensemble"      # 自动选择
+    validation_split: 0.2       # 验证集比例
+    
+  # 预测
+  prediction:
+    use_uncertainty: true       # 启用不确定度
+    fallback_to_original: true  # 失败时回退到原ML
+    
+  # 模型保存
+  saving:
+    keep_checkpoints: 5         # 保留最近5个模型
+    save_metadata: true         # 保存元数据
+    
+# 性能监控
+monitoring:
+  log_predictions: true
+  track_accuracy: true
+  alert_on_degradation: true    # 性能下降时报警

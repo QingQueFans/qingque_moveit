@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""
+验证轨迹（状态序列）的连续性和可行性
+"""
+import sys
+import os
+import argparse
+import json
+import time
+
+# ========== 设置路径 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
+sys.path.insert(0, CORE_SRC)
+
+DETECTION_SRC = os.path.join(MODULE_ROOT, 'src')
+sys.path.insert(0, DETECTION_SRC)
+
+OBJ_MODULE_ROOT = os.path.join(PROJECT_ROOT, 'collision_objects')
+OBJ_SRC = os.path.join(OBJ_MODULE_ROOT, 'src')
+sys.path.insert(0, OBJ_SRC)
+
+from ps_core.scene_client import PlanningSceneClient
+from ps_validation.trajectory_validator import TrajectoryValidator
+from ps_objects.object_manager import ObjectManager
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="验证轨迹（状态序列）的连续性和可行性",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 验证轨迹文件
+  %(prog)s --trajectory-file trajectory.json
+  
+  # 验证当前场景中的轨迹
+  %(prog)s --current-trajectory
+  
+  # 验证关节轨迹
+  %(prog)s --joint-trajectory "[ [0,0,0,0,0,0], [0.1,0,0,0,0,0], [0.2,0,0,0,0,0] ]"
+  
+  # 验证带时间戳的轨迹
+  %(prog)s --trajectory-file timed_trajectory.json --check-timing --check-velocity
+  
+  # 只检查碰撞和关节限位
+  %(prog)s --trajectory-file path.json --check-collision --check-joint-limits
+  
+  # 设置验证参数
+  %(prog)s --trajectory-file path.json --max-velocity 0.5 --max-acceleration 1.0
+  
+  # JSON格式输出
+  %(prog)s --trajectory-file trajectory.json --json
+        """
+    )
+    
+    # 轨迹输入选项
+    trajectory_group = parser.add_mutually_exclusive_group(required=True)
+    trajectory_group.add_argument('--trajectory-file', '-f', type=str,
+                                help='轨迹文件路径（JSON格式）')
+    trajectory_group.add_argument('--joint-trajectory', '-j', type=str,
+                                help='关节轨迹（JSON数组的数组）')
+    trajectory_group.add_argument('--current-trajectory', '-c', action='store_true',
+                                help='使用当前场景中的轨迹')
+    trajectory_group.add_argument('--waypoints-file', '-w', type=str,
+                                help='路径点文件（JSON格式）')
+    
+    # 验证选项
+    parser.add_argument('--check-continuity', action='store_true',
+                       help='检查连续性')
+    parser.add_argument('--check-joint-limits', action='store_true',
+                       help='检查关节限位')
+    parser.add_argument('--check-collision', action='store_true',
+                       help='检查碰撞')
+    parser.add_argument('--check-velocity', action='store_true',
+                       help='检查速度限制')
+    parser.add_argument('--check-acceleration', action='store_true',
+                       help='检查加速度限制')
+    parser.add_argument('--check-smoothness', action='store_true',
+                       help='检查平滑性')
+    parser.add_argument('--check-timing', action='store_true',
+                       help='检查时间参数')
+    parser.add_argument('--check-all', '-a', action='store_true',
+                       help='执行所有检查')
+    
+    # 验证参数
+    parser.add_argument('--max-velocity', type=float, default=1.0,
+                       help='最大关节速度（rad/s，默认: 1.0）')
+    parser.add_argument('--max-acceleration', type=float, default=2.0,
+                       help='最大关节加速度（rad/s²，默认: 2.0）')
+    parser.add_argument('--max-position-error', type=float, default=0.01,
+                       help='最大位置误差（m，默认: 0.01）')
+    parser.add_argument('--time-resolution', type=float, default=0.01,
+                       help='时间分辨率（s，默认: 0.01）')
+    
+    # 输出选项
+    parser.add_argument('--json', action='store_true',
+                       help='JSON格式输出')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='详细输出')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='安静模式')
+    
+    args = parser.parse_args()
+    
+    try:
+        # 初始化
+        client = PlanningSceneClient()
+        validator = TrajectoryValidator(client)
+        manager = ObjectManager(client)        # 构建验证参数
+        validation_params = {
+            "max_joint_velocity": args.max_velocity,
+            "max_joint_acceleration": args.max_acceleration,
+            "max_position_error": args.max_position_error,
+            "time_resolution": args.time_resolution
+        }
+        
+        # 确定要执行的检查
+        checks_to_perform = []
+        
+        if args.check_all:
+            checks_to_perform = ["all"]
+        else:
+            if args.check_continuity:
+                checks_to_perform.append("continuity")
+            if args.check_joint_limits:
+                checks_to_perform.append("joint_limits")
+            if args.check_collision:
+                checks_to_perform.append("collision")
+            if args.check_velocity:
+                checks_to_perform.append("velocity_limits")
+            if args.check_acceleration:
+                checks_to_perform.append("acceleration_limits")
+            if args.check_smoothness:
+                checks_to_perform.append("smoothness")
+            if args.check_timing:
+                checks_to_perform.append("timing")
+        
+        if checks_to_perform:
+            validation_params["checks"] = checks_to_perform
+        
+        # 加载轨迹数据
+        trajectory_config = {"id": "command_line_trajectory"}
+        
+        if args.trajectory_file:
+            with open(args.trajectory_file, 'r') as f:
+                trajectory_config = json.load(f)
+                
+        elif args.joint_trajectory:
+            try:
+                joint_states = json.loads(args.joint_trajectory)
+                if not isinstance(joint_states, list) or not joint_states:
+                    print("错误：关节轨迹必须是非空的数组")
+                    return 1
+                
+                states = []
+                for i, joint_state in enumerate(joint_states):
+                    state = {
+                        "id": f"point_{i}",
+                        "joint_state": joint_state,
+                        "time_from_start": i * 0.1  # 默认时间间隔0.1s
+                    }
+                    states.append(state)
+                
+                trajectory_config["states"] = states
+                trajectory_config["type"] = "joint_trajectory"
+                
+            except json.JSONDecodeError as e:
+                print(f"错误：无效的关节轨迹JSON格式: {e}")
+                return 1
+                
+        elif args.current_trajectory:            # 简化：使用虚拟轨迹
+            print("警告：当前轨迹功能未实现，使用示例轨迹")
+            trajectory_config = {
+                "id": "example_trajectory",
+                "type": "example",
+                "states": [
+                    {"joint_state": [0, 0, 0, 0, 0, 0], "time_from_start": 0.0},
+                    {"joint_state": [0.1, 0, 0, 0, 0, 0], "time_from_start": 0.5},
+                    {"joint_state": [0.2, 0, 0, 0, 0, 0], "time_from_start": 1.0}
+                ]
+            }
+            
+        elif args.waypoints_file:
+            with open(args.waypoints_file, 'r') as f:
+                waypoints_data = json.load(f)
+            
+            waypoints = waypoints_data.get("waypoints", [])
+            if not waypoints:
+                print("错误：路径点文件中没有路径点数据")
+                return 1
+            
+            states = []
+            for i, wp in enumerate(waypoints):
+                state = {
+                    "id": f"waypoint_{i}",
+                    "position": wp.get("position", [0, 0, 0]),
+                    "orientation": wp.get("orientation", [0, 0, 0, 1]),
+                    "joint_state": wp.get("joint_state", []),
+                    "time_from_start": wp.get("time", i * 0.2)
+                }
+                states.append(state)
+            
+            trajectory_config["states"] = states
+            trajectory_config["type"] = "waypoints"
+        
+        # 执行轨迹验证
+        if not args.quiet:
+            print(f"正在验证轨迹...")
+            print(f"轨迹类型: {trajectory_config.get('type', 'unknown')}")
+            print(f"状态数量: {len(trajectory_config.get('states', []))}")
+            if checks_to_perform:
+                print(f"检查项: {', '.join(checks_to_perform)}")
+        
+        start_time = time.time()
+        results = validator.validate_trajectory(trajectory_config, validation_params)
+        elapsed_time = time.time() - start_time
+        
+        results["validation_time"] = elapsed_time
+        
+        # 输出结果
+        if args.json:
+            print(json.dumps(results, indent=2, default=str))
+        elif not args.quiet:
+            _print_trajectory_results(results, args.verbose)
+        
+        # 返回退出代码
+        return 0 if results.get("valid", False) else 1
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+def _print_trajectory_results(results, verbose=False):
+    """打印轨迹验证结果"""
+    print("\n" + "="*60)
+    print("轨迹验证结果")
+    print("="*60)
+    
+    if "error" in results:
+        print(f"❌ 验证失败: {results['error']}")
+        return
+    
+    trajectory_id = results.get("trajectory_id", "unknown")
+    total_points = results.get("total_points", 0)
+    validation_time = results.get("validation_time", 0)
+    
+    print(f"轨迹ID: {trajectory_id}")
+    print(f"轨迹点数: {total_points}")
+    print(f"验证时间: {validation_time:.3f}s")
+    print(f"时间戳: {results.get('timestamp', '未知')}")
+    
+    # 显示轨迹质量指标
+    quality_metrics = results.get("quality_metrics", {})
+    if quality_metrics:
+        print(f"\n轨迹质量指标:")
+        print("-" * 40)
+        
+        print(f"总时间: {quality_metrics.get('total_time', 0):.2f}s")
+        print(f"总关节距离: {quality_metrics.get('total_joint_distance', 0):.2f} rad")
+        print(f"总笛卡尔距离: {quality_metrics.get('total_cartesian_distance', 0):.2f} m")
+        print(f"平均关节速度: {quality_metrics.get('average_joint_velocity', 0):.2f} rad/s")
+        print(f"平均笛卡尔速度: {quality_metrics.get('average_cartesian_velocity', 0):.2f} m/s")
+        print(f"平滑度分数: {quality_metrics.get('smoothness_score', 0):.2f}")
+        print(f"效率指标: {quality_metrics.get('efficiency', 0):.2f}")    
+    # 显示验证总结
+    summary = results.get("summary", {})
+    if summary:
+        print(f"\n验证总结:")
+        print("-" * 40)
+        
+        quality_rating = summary.get("quality_rating", "unknown")
+        rating_symbol = {
+            "excellent": "🏆",
+            "good": "👍",
+            "fair": "👌",
+            "poor": "👎"
+        }.get(quality_rating, "❓")
+        
+        print(f"轨迹有效性: {'✅ 有效' if summary.get('trajectory_valid', False) else '❌ 无效'}")
+        print(f"质量评级: {rating_symbol} {quality_rating}")
+        print(f"总违规数: {summary.get('total_violations', 0)}")
+        
+        severity_breakdown = summary.get("severity_breakdown", {})
+        if severity_breakdown:
+            print(f"严重程度分布:")
+            for severity, count in severity_breakdown.items():
+                if count > 0:
+                    severity_symbol = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
+                    print(f"  {severity_symbol} {severity}: {count}")
+    
+    # 显示违规详情
+    violations = results.get("violations", [])
+    if violations:
+        print(f"\n违规详情 ({len(violations)} 个):")
+        print("-" * 40)
+        
+        # 按检查类型分组
+        violations_by_type = {}
+        for violation in violations:
+            check_type = violation.get("check_type", "unknown")
+            if check_type not in violations_by_type:
+                violations_by_type[check_type] = []
+            violations_by_type[check_type].append(violation)
+        
+        for check_type, type_violations in violations_by_type.items():
+            print(f"\n{check_type} 检查 ({len(type_violations)} 个违规):")
+            
+            for i, violation in enumerate(type_violations[:5], 1):
+                severity = violation.get("severity", "medium")
+                description = violation.get("description", "无描述")
+                
+                severity_symbol = {
+                    "high": "🔴",
+                    "medium": "🟡", 
+                    "low": "🟢"
+                }.get(severity, "⚪")
+                
+                print(f"  {i:2d}. {severity_symbol} {description}")
+                
+                if verbose and "suggestion" in violation:
+                    print(f"      建议: {violation['suggestion']}")
+            
+            if len(type_violations) > 5:
+                print(f"      ... 还有 {len(type_violations) - 5} 个违规未显示")
+    
+    # 显示修复建议
+    recommendations = summary.get("recommendations", [])
+    if recommendations:
+        print(f"\n修复建议 ({len(recommendations)} 条):")
+        print("-" * 40)
+        
+        for i, recommendation in enumerate(recommendations, 1):
+            print(f"{i:2d}. {recommendation}")
+    
+    print("\n" + "="*60)
+
+if __name__ == "__main__":
+    sys.exit(main())

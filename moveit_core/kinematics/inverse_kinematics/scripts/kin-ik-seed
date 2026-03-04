@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""
+kin-ik: 基本逆运动学求解脚本
+"""
+import sys
+import os
+import argparse
+import json
+import time
+import numpy as np
+
+# ========== 路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+# 计算 moveit_core 的根目录
+MOVEIT_CORE_ROOT = os.path.dirname(PROJECT_ROOT)  # 向上两级到 moveit_core
+print(f"MOVEIT_CORE_ROOT: {MOVEIT_CORE_ROOT}")
+
+# 正确设置 ps_core 的路径
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+IK_SRC = os.path.join(MODULE_ROOT, 'src')
+
+# 添加路径（注意顺序）
+sys.path.insert(0, IK_SRC)           # 1. 先添加逆运动学
+sys.path.insert(0, PLANNING_SCENE_SRC)  # 2. 添加规划场景
+
+try:
+    # 现在应该能正确导入了
+    from ps_core.scene_client import PlanningSceneClient
+    from kin_ik import IKSolver, IKSampler
+    HAS_DEPENDENCIES = True
+    print("✓ 成功导入所有依赖")
+except ImportError as e:
+    print(f"[警告] 导入依赖失败: {e}")
+    import traceback
+    traceback.print_exc()  # 打印完整的堆栈跟踪
+    HAS_DEPENDENCIES = False
+def main():
+    parser = argparse.ArgumentParser(
+        description='指定种子进行逆运动学求解',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+种子来源:
+  1. 直接指定 --seed "0 0 0 0 0 0"
+  2. 从文件读取 --seed-file seeds.json
+  3. 使用采样器生成 --sample-workspace NUM
+  4. 在已有解附近采样 --sample-near SOLUTION VARIANCE
+
+示例:
+  kin-ik-seed --pose "0.5 0.0 0.3 0 0 0 1" --seed "0 0 0 0 0 0"
+  kin-ik-seed --pose pose.json --sample-workspace 10
+  kin-ik-seed --pose pose.json --sample-near "0.1 0.2 0.3 0.4 0.5 0.6" 0.05
+        '''
+    )
+    
+    # 输入参数
+    parser.add_argument('--pose', type=str, required=True,
+                       help='目标位姿 (x y z qx qy qz qw)')
+    parser.add_argument('--pose-file', type=str,
+                       help='包含位姿的JSON文件')
+    
+    # 种子选项组
+    seed_group = parser.add_mutually_exclusive_group()
+    seed_group.add_argument('--seed', type=str,
+                           help='种子解 (空格分隔)')
+    seed_group.add_argument('--seed-file', type=str,
+                           help='种子文件')
+    seed_group.add_argument('--sample-workspace', type=int,
+                           metavar='NUM',
+                           help='在工作空间采样种子')
+    seed_group.add_argument('--sample-near', nargs=2,
+                           metavar=('SOLUTION', 'VARIANCE'),
+                           help='在已有解附近采样')
+    
+    # 其他选项
+    parser.add_argument('--check-collision', action='store_true')
+    parser.add_argument('--json', action='store_true')
+    parser.add_argument('--verbose', '-v', action='count', default=0)
+    
+    args = parser.parse_args()
+    
+    try:
+        # 初始化
+        client = PlanningSceneClient() if HAS_DEPENDENCIES else None
+        ik_solver = IKSolver(client)
+        
+        # 解析位姿
+        if args.pose_file:
+            with open(args.pose_file, 'r') as f:
+                data = json.load(f)
+            target_pose = data.get("pose")
+        else:
+            target_pose = [float(x) for x in args.pose.split()]
+            if len(target_pose) != 7:
+                print("错误: 需要7个数字")
+                return 1
+        
+        # 处理种子
+        seeds = []
+        
+        if args.seed:
+            # 直接指定种子
+            seed = [float(x) for x in args.seed.split()]
+            seeds.append(seed)
+            print(f"使用指定种子: {seed}")
+            
+        elif args.seed_file:
+            # 从文件读取种子
+            with open(args.seed_file, 'r') as f:
+                data = json.load(f)
+            
+            if isinstance(data, list):
+                seeds = data
+            elif "seeds" in data:
+                seeds = data["seeds"]
+            elif "solution" in data:
+                seeds = [data["solution"]]
+            
+            print(f"从文件读取 {len(seeds)} 个种子")
+            
+        elif args.sample_workspace:           # 使用采样器
+            sampler = IKSampler(ik_solver)
+            sampled = sampler.sample_workspace(args.sample_workspace)
+            seeds = [s["joints"] for s in sampled]
+            print(f"在工作空间采样 {len(seeds)} 个种子")
+            
+        elif args.sample_near:
+            # 在已有解附近采样
+            base_solution = [float(x) for x in args.sample_near[0].split()]
+            variance = float(args.sample_near[1])
+            
+            sampler = IKSampler(ik_solver)
+            sampled = sampler.sample_near_solution(base_solution, variance)
+            seeds = [s["perturbed"] for s in sampled]
+            print(f"在解附近采样 {len(seeds)} 个种子 (方差: {variance})")
+        
+        else:
+            print("错误: 必须指定种子来源")
+            return 1
+        
+        # 使用每个种子求解
+        results = []
+        for i, seed in enumerate(seeds):
+            if args.verbose >= 1:
+                print(f"\n使用种子 {i+1}/{len(seeds)}: {seed}")
+            
+            result = ik_solver.solve(target_pose, seed, args.check_collision)
+            result["seed_index"] = i
+            result["seed"] = seed
+            results.append(result)
+        
+        # 统计结果
+        success_count = sum(1 for r in results if r["success"])
+        
+        if args.json:
+            output = {
+                "target_pose": target_pose,
+                "seed_count": len(seeds),
+                "success_count": success_count,
+                "results": results
+            }
+            print(json.dumps(output, indent=2, default=str))
+        else:
+            print(f"\n种子求解总结:")
+            print(f"  目标位姿: {target_pose}")
+            print(f"  种子数量: {len(seeds)}")
+            print(f"  成功数量: {success_count}")
+            print(f"  成功率: {success_count/len(seeds)*100:.1f}%")
+            
+            if args.verbose >= 1:
+                print(f"\n详细结果:")
+                for i, result in enumerate(results):
+                    status = "✓" if result["success"] else "✗"
+                    seed_str = f"{result['seed'][:3]}..." if len(result['seed']) > 3 else result['seed']
+                    print(f"  种子{i}: {seed_str} -> {status}")
+                    
+                    if result["success"]:
+                        print(f"      解: {result['solution'][:3]}...")
+                        print(f"      质量: {result['quality']:.3f}")
+        
+        return 0 if success_count > 0 else 1
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

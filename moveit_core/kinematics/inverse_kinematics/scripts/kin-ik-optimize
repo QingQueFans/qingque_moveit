@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""
+kin-ik: 基本逆运动学求解脚本
+"""
+import sys
+import os
+import argparse
+import json
+import time
+import numpy as np
+
+# ========== 路径设置 ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
+# 计算 moveit_core 的根目录
+MOVEIT_CORE_ROOT = os.path.dirname(PROJECT_ROOT)  # 向上两级到 moveit_core
+print(f"MOVEIT_CORE_ROOT: {MOVEIT_CORE_ROOT}")
+
+# 正确设置 ps_core 的路径
+PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
+IK_SRC = os.path.join(MODULE_ROOT, 'src')
+
+# 添加路径（注意顺序）
+sys.path.insert(0, IK_SRC)           # 1. 先添加逆运动学
+sys.path.insert(0, PLANNING_SCENE_SRC)  # 2. 添加规划场景
+
+try:
+    # 现在应该能正确导入了
+    from ps_core.scene_client import PlanningSceneClient
+    from kin_ik import IKSolver,IKOptimizer
+    HAS_DEPENDENCIES = True
+    print("✓ 成功导入所有依赖")
+except ImportError as e:
+    print(f"[警告] 导入依赖失败: {e}")
+    import traceback
+    traceback.print_exc()  # 打印完整的堆栈跟踪
+    HAS_DEPENDENCIES = False
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='优化逆运动学解',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+优化目标权重:
+  --weight-movement W    关节运动最小化权重 (默认: 0.3)
+  --weight-manipulability W 可操作性最大化权重 (默认: 0.3)
+  --weight-singularity W 奇异性避免权重 (默认: 0.2)
+  --weight-preference W  关节偏好权重 (默认: 0.1)
+  --weight-energy W      能量最小化权重 (默认: 0.1)
+
+示例:
+  kin-ik-optimize --pose "0.5 0.0 0.3 0 0 0 1"
+  kin-ik-optimize --pose pose.json --method simulated_annealing
+        '''
+    )
+    
+    # 输入参数
+    parser.add_argument('--pose', type=str,
+                       help='目标位姿 (x y z qx qy qz qw)')
+    parser.add_argument('--pose-file', type=str,
+                       help='包含位姿的JSON文件')
+    parser.add_argument('--solution', type=str,
+                       help='初始解 (空格分隔的关节角度)')
+    parser.add_argument('--solution-file', type=str,
+                       help='包含初始解的JSON文件')
+    
+    # 优化参数
+    parser.add_argument('--method', type=str,
+                       choices=['gradient_descent', 'random_search', 'simulated_annealing'],
+                       default='gradient_descent',
+                       help='优化方法 (默认: gradient_descent)')
+    
+    parser.add_argument('--iterations', type=int, default=50,
+                       help='最大迭代次数 (默认: 50)')
+    
+    # 权重参数
+    parser.add_argument('--weight-movement', type=float, default=0.3)
+    parser.add_argument('--weight-manipulability', type=float, default=0.3)
+    parser.add_argument('--weight-singularity', type=float, default=0.2)
+    parser.add_argument('--weight-preference', type=float, default=0.1)
+    parser.add_argument('--weight-energy', type=float, default=0.1)
+    
+    # 输出选项
+    parser.add_argument('--json', action='store_true',
+                       help='JSON输出格式')
+    parser.add_argument('--verbose', '-v', action='count', default=0)
+    
+    args = parser.parse_args()
+    
+    try:
+        # 检查输入
+        if not args.pose and not args.pose_file:
+            print("错误: 需要指定位姿")
+            return 1
+        
+        # 初始化
+        client = PlanningSceneClient() if HAS_DEPENDENCIES else None
+        ik_solver = IKSolver(client)
+        
+        # 创建优化器
+        optimizer = IKOptimizer(ik_solver=ik_solver)
+        
+        # 设置权重
+        weights = {
+            "joint_movement": args.weight_movement,
+            "manipulability": args.weight_manipulability,
+            "singularity": args.weight_singularity,
+            "joint_preference": args.weight_preference,
+            "energy": args.weight_energy
+        }
+        optimizer.set_objective_weights(weights)
+        
+        # 设置优化器
+        ik_solver.set_optimizer(optimizer)
+        
+        # 解析位姿
+        if args.pose_file:
+            with open(args.pose_file, 'r') as f:
+                data = json.load(f)
+            target_pose = data.get("pose")
+        else:
+            target_pose = [float(x) for x in args.pose.split()]
+            if len(target_pose) != 7:
+                print("错误: 需要7个数字")
+                return 1        # 获取初始解
+        initial_solution = None
+        if args.solution:
+            initial_solution = [float(x) for x in args.solution.split()]
+        elif args.solution_file:
+            with open(args.solution_file, 'r') as f:
+                data = json.load(f)
+            initial_solution = data.get("solution")
+        else:
+            # 先求解一个基本解
+            print("未指定初始解，先求解基本IK...")
+            base_result = ik_solver.solve(target_pose)
+            if not base_result["success"]:
+                print("基本IK求解失败")
+                return 1
+            initial_solution = base_result["solution"]
+        
+        print(f"初始解: {initial_solution}")
+        print(f"优化方法: {args.method}")
+        print(f"最大迭代: {args.iterations}")
+        
+        # 执行优化
+        result = ik_solver.solve_optimized(target_pose, initial_solution)
+        
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print(f"\n优化结果:")
+            print(f"  成功: {'✓' if result['success'] else '✗'}")
+            
+            if result["success"]:
+                print(f"  优化解: {result['solution']}")
+                
+                if "optimization_info" in result:
+                    info = result["optimization_info"]
+                    print(f"  初始分数: {info['initial_score']:.4f}")
+                    print(f"  最终分数: {info['final_score']:.4f}")
+                    print(f"  改进: {info['improvement']:.4f}")
+                    print(f"  方法: {info['method']}")
+                    print(f"  迭代次数: {info['iterations']}")
+                
+                if args.verbose >= 1 and "optimization_info" in result:
+                    info = result["optimization_info"]
+                    print(f"\n  历史记录 (前5次迭代):")
+                    for i, h in enumerate(info["history"][:5]):
+                        print(f"    迭代{i}: 分数={h['score']:.4f}")
+        
+        return 0 if result["success"] else 1
+        
+    except KeyboardInterrupt:
+        print("\n操作被中断")
+        return 130
+    except Exception as e:
+        print(f"错误: {e}")
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())
