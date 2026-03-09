@@ -1,0 +1,190 @@
+// frontend/src/stores/robot.ts
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import * as ROSLIB from 'roslib'
+
+export const useRobotStore = defineStore('robot', () => {
+  const connected = ref(false)
+  const objects = ref<string[]>([])
+  const taskStatus = ref<'idle' | 'running' | 'success' | 'failed'>('idle')
+  const lastResult = ref<any>(null)
+
+  let ros: any = null
+  let graspService: any = null
+  let moveService: any = null
+  let addService: any = null
+  let removeService: any = null
+  let listService: any = null
+
+  // ========== 连接 ==========
+  const connect = () => {
+    console.log('🔄 正在连接 WebSocket: ws://localhost:8765')
+    ros = new ROSLIB.Ros({ url: 'ws://127.0.0.1:8765' })
+    ros.on('connection', () => {
+      connected.value = true
+      console.log('✅ 已连接到 ROS 2')
+      
+      // 初始化服务
+      graspService = new ROSLIB.Service({
+        ros,
+        name: '/grasp_object',
+        serviceType: 'robot_interfaces/srv/GraspObject'
+      })
+      
+      moveService = new ROSLIB.Service({
+        ros,
+        name: '/move_to_pose',
+        serviceType: 'robot_interfaces/srv/MoveToPose'
+      })
+      
+      addService = new ROSLIB.Service({
+        ros,
+        name: '/add_object',
+        serviceType: 'robot_interfaces/srv/AddObject'
+      })
+      
+      removeService = new ROSLIB.Service({
+        ros,
+        name: '/remove_object',
+        serviceType: 'robot_interfaces/srv/RemoveObject'
+      })
+      listService = new ROSLIB.Service({
+        ros,
+        name: '/list_objects',
+        serviceType: 'robot_interfaces/srv/ListObjects'
+      })      
+
+      listObjects()
+    })
+
+    ros.on('error', (err: any) => {
+      console.error('❌ 连接错误:', err)
+      connected.value = false
+    })
+
+    ros.on('close', () => {
+      console.log('❌ 连接关闭')
+      connected.value = false
+    })
+  }
+
+  // ========== 抓取物体 ==========
+  const graspObject = (objectId: string, width?: number) => {
+    if (!graspService) {
+      console.error('抓取服务未初始化')
+      return
+    }
+    
+    taskStatus.value = 'running'
+    const request = { object_id: objectId }
+    
+    graspService.callService(request, (result: any) => {
+      taskStatus.value = result.success ? 'success' : 'failed'
+      lastResult.value = result
+      
+      if (result.success) {
+        console.log('✅ 抓取成功:', objectId)
+        listObjects() // 刷新列表
+      } else {
+        console.error('❌ 抓取失败:', result.message)
+      }
+    })
+  }
+
+  // ========== 移动到位姿 ==========
+  const moveToPose = (pose: number[]) => {
+    if (!moveService) {
+      console.error('移动服务未初始化')
+      return
+    }
+    
+    taskStatus.value = 'running'
+    const request = { pose }
+    
+    moveService.callService(request, (result: any) => {
+      taskStatus.value = result.success ? 'success' : 'failed'
+      lastResult.value = result
+    })
+  }
+
+  // ========== 添加物体 ==========
+  const addObject = (params: any) => {
+    if (!addService) {
+      console.error('添加服务未初始化')
+      return
+    }
+    
+    // 转换参数格式
+    const request: any = {
+      type: params.shape || params.type,
+      object_id: params.object_id,
+      position: params.position
+    }
+    
+    if (params.size) {
+      request.size = params.size
+    }
+    if (params.radius) {
+      request.radius = params.radius
+    }
+    if (params.height) {
+      request.height = params.height
+    }
+    
+    addService.callService(request, (result: any) => {
+      if (result.success) {
+        console.log('✅ 添加成功:', params.object_id)
+        listObjects()
+      } else {
+        console.error('❌ 添加失败:', result.message)
+      }
+    })
+  }
+
+  // ========== 移除物体 ==========
+  const removeObject = (objectId: string) => {
+    if (!removeService) {
+      console.error('移除服务未初始化')
+      return
+    }
+    
+    const request = { object_id: objectId }
+    removeService.callService(request, (result: any) => {
+      if (result.success) {
+        console.log('✅ 移除成功:', objectId)
+        listObjects()
+      } else {
+        console.error('❌ 移除失败:', result.message)
+      }
+    })
+  }
+
+  // ========== 列出物体 ==========
+  const listObjects = () => {
+    if (!listService) {
+      console.error('列表服务未初始化')
+      return
+    }
+    listService.callService({}, (result: any) => {
+      objects.value = result.objects
+    })
+  }
+  // ========== 发送消息（暂时保留，以后会删） ==========
+  const sendMessage = (msg: any) => {
+    console.warn('sendMessage 已废弃，改用服务调用', msg)
+  }
+
+  return {
+    connected,
+    objects,
+    taskStatus,
+    lastResult,
+    connect,
+    graspObject,
+    moveToPose,
+    addObject,
+    removeObject,
+    sendMessage,  // 暂时保留，以后删
+    listObjects
+  }
+})

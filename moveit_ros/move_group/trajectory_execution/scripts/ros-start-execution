@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-
 """
-ros-start-execution: 轨迹执行脚本 - 稳定版本
+ros-start-execution: 轨迹执行脚本 - pymoveit2 版
 """
 import sys
 import os
@@ -9,7 +8,6 @@ import argparse
 import json
 import time
 import numpy as np
-import sys
 
 # ========== 路径设置 ==========
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,76 +26,92 @@ while current_dir:
         break
     current_dir = os.path.dirname(current_dir)
 
-# 设置路径
-PLANNING_SCENE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src')
-MOVEIT_CONTROLLER_SRC = os.path.join(MOVEIT_PLUGINS_ROOT, 'moveit_controller_manager', 'src')
-TRAJECTORY_EXECUTION_SRC = os.path.join(MODULE_ROOT, 'src')
-PLANNER_SRC = os.path.join(MOVEIT_PLANNERS_ROOT, 'src')  
-# 在脚本的路径设置部分添加：
-ROLLBACK_MANAGER_PATH = os.path.join(MODULE_ROOT, 'src', 'trajectory_execution')
-CACHE_SRC = os.path.join(MOVEIT_CORE_ROOT, 'cache_manager', 'src')
+# ========== 收集所有路径 ==========
+ALL_PATHS = [
+    # pymoveit2 放最前面
+    '/home/diyuanqiongyu/qingfu_moveit/install/pymoveit2/lib/python3.10/site-packages',
+    
+    # 你的手写模块路径
+    os.path.join(MOVEIT_CORE_ROOT, 'planning_scene', 'core_functions', 'src'),
+    os.path.join(MOVEIT_CORE_ROOT, 'cache_manager', 'src'),
+    os.path.join(MODULE_ROOT, 'src'),
+    os.path.join(MODULE_ROOT, 'src', 'trajectory_execution'),
+    os.path.join(MOVEIT_PLUGINS_ROOT, 'moveit_controller_manager', 'src'),
+    os.path.join(MOVEIT_PLANNERS_ROOT, 'src'),
+]
 
-sys.path.insert(0, ROLLBACK_MANAGER_PATH)
-sys.path.insert(0, TRAJECTORY_EXECUTION_SRC)
-sys.path.insert(0, MOVEIT_CONTROLLER_SRC)
-sys.path.insert(0, PLANNING_SCENE_SRC)
-sys.path.insert(0, PLANNER_SRC)  
-sys.path.insert(0, CACHE_SRC)
+# ========== 统一添加路径 ==========
+added_paths = []
+for path in ALL_PATHS:
+    if os.path.exists(path) and path not in sys.path:
+        sys.path.insert(0, path)
+        added_paths.append(path)
 
-print(f"[轨迹执行] 路径设置:")
-print(f"  当前模块: {TRAJECTORY_EXECUTION_SRC}")
-print(f"  控制器管理器: {MOVEIT_CONTROLLER_SRC}")
-print(f"  规划场景: {PLANNING_SCENE_SRC}")
-print(f"  规划器: {PLANNER_SRC}")  
-
+print(f"[轨迹执行] 路径设置完成，添加了 {len(added_paths)} 个路径")
+if added_paths:
+    print(f"  包含: {[os.path.basename(p) for p in added_paths[:3]]}...")
+PYMOVEIT2_PATH = '/home/diyuanqiongyu/qingfu_moveit/install/pymoveit2/local/lib/python3.10/dist-packages'
+sys.path.insert(0, PYMOVEIT2_PATH)
 # ========== 导入检查 ==========
+HAS_DEPENDENCIES = False
+
 try:
-    from ps_core.scene_client import PlanningSceneClient
+    # 先检查 pymoveit2（核心）
+    from pymoveit2 import MoveIt2
+    from pymoveit2 import MoveIt2Gripper
+    print("✅ pymoveit2 导入成功")
+    
+    # 再检查你的模块
     from trajectory_execution import TrajectoryExecutionManager
+    print("✅ TrajectoryExecutionManager 导入成功")
     
     import rclpy
     from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+    print("✅ ROS2 模块导入成功")
+    
+    # 可选模块（不强制）
+    try:
+        from ps_cache.object_cache import ObjectCache
+        HAS_CACHE = True
+        print("✅ 缓存系统可用")
+    except ImportError:
+        HAS_CACHE = False
+        print("⚠️ 缓存系统不可用")
+        
     HAS_DEPENDENCIES = True
-    print("✅ 所有依赖导入成功")
+    
 except ImportError as e:
     print(f"❌ 导入依赖失败: {e}")
     HAS_DEPENDENCIES = False
-    
-# ========== 轨迹生成函数 ==========
+# ========== 轨迹生成函数（完全保留） ==========
 def create_panda_trajectory(points_count=3, velocities=None):
     """创建Panda机械臂的测试轨迹"""
     trajectory = JointTrajectory()
     
-    # Panda机械臂的关节名
     trajectory.joint_names = [
         'panda_joint1', 'panda_joint2', 'panda_joint3',
         'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7'
     ]
     
-    # 生成轨迹点
     for i in range(points_count):
         point = JointTrajectoryPoint()
+        point.positions = np.random.uniform(-1.5, 1.5, 7).tolist()
         
-        # 生成合理的关节位置（Panda的安全范围）
-        point.positions = np.random.uniform(-1.5, 1.5, 7).tolist()  # -85°到85°
-        
-        # 速度（可选）
         if velocities:
             point.velocities = velocities
         else:
-            point.velocities = np.random.uniform(-0.3, 0.3, 7).tolist()        # 时间（从起点开始）
+            point.velocities = np.random.uniform(-0.3, 0.3, 7).tolist()
+        
         point.time_from_start.sec = i + 1
         point.time_from_start.nanosec = 0
         
         trajectory.points.append(point)
     
     print(f"[轨迹生成] 创建了 {len(trajectory.points)} 个轨迹点")
-    print(f"[轨迹生成] 关节: {trajectory.joint_names[:3]}...")
-    
     return trajectory
 
 def create_zero_trajectory():
-    """创建零位置轨迹（最简单、最安全）"""
+    """创建零位置轨迹"""
     trajectory = JointTrajectory()
     
     trajectory.joint_names = [
@@ -106,48 +120,46 @@ def create_zero_trajectory():
     ]
     
     point = JointTrajectoryPoint()
-    point.positions = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    point.positions = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
     point.time_from_start.sec = 2
     trajectory.points.append(point)
     
     print("[轨迹生成] 创建零位置轨迹")
     return trajectory
+
 def create_goal_state_from_args(args):
-    """从命令行参数创建目标状态 - 支持物体ID"""
-    if args.object_id:  # 需要添加这个参数
+    """从命令行参数创建目标状态"""
+    if args.object_id:
         print(f"[规划] 使用物体ID: {args.object_id}")
         return {"object_id": args.object_id}
     elif args.goal_joints:
-        # 使用指定的关节角度
         goal_state = {}
         goal_state["joints"] = [float(x) for x in args.goal_joints.split(',')]
-        print(f"[规划] 使用指定关节角度: {goal_state['joints']}")
+        print(f"[规划] 使用指定关节角度: {goal_state['joints'][:3]}...")
         return goal_state
     elif args.goal_pose:
-        # 使用指定的末端位姿
         goal_state = {}
         pose_parts = [float(x) for x in args.goal_pose.split(',')]
         if len(pose_parts) == 6:
-            goal_state["pose"] = {
-                "position": pose_parts[:3],
-                "orientation": pose_parts[3:]
-            }
+            # 欧拉角需要转换，这里简化处理
+            goal_state["pose"] = pose_parts[:3] + [0.0, 0.0, 0.0, 1.0]
         elif len(pose_parts) == 7:
             goal_state["pose"] = pose_parts
-        print(f"[规划] 使用末端位姿: {goal_state['pose']}")
+        print(f"[规划] 使用末端位姿: {goal_state['pose'][:3]}")
         return goal_state
     else:
         # 默认目标
         goal_state = {"joints": [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]}
         print(f"[规划] 使用默认关节角度")
         return goal_state
+
 def create_start_state():
-    """创建起始状态（可根据需要从实际机器人获取）"""
-    # 这里可以改为从实际机器人获取当前状态
+    """创建起始状态"""
     return {
-        "joints": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # 起始位置
+        "joints": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "pose": None
     }
+
 def list_predefined_objects():
     """列出所有预定义的物体ID"""
     object_grasp_poses = {
@@ -162,26 +174,16 @@ def list_predefined_objects():
         print(f"{obj_id:20} 位置: [{pose[0]:.2f}, {pose[1]:.2f}, {pose[2]:.2f}]")
     print("=" * 40)
     return True
-# ========== 结果输出函数 ==========
+
+# ========== 结果输出函数（完全保留） ==========
 def print_result(result, verbose=0, json_output=False):
-    """格式化输出结果 - 修复版，支持嵌套结构"""
+    """格式化输出结果"""
     if json_output:
         print(json.dumps(result, indent=2, default=str))
         return
     
     print("\n" + "="*60)
     
-    # 详细模式输出
-    if verbose > 0:
-        print(f"[详细模式] 结果结构:")
-        print(f"  keys: {list(result.keys())}")
-        if "planning" in result:
-            print(f"  planning keys: {list(result['planning'].keys())}")
-        if "execution" in result:
-            print(f"  execution keys: {list(result['execution'].keys())}")
-        print("-"*60)
-    
-    # 判断输出类型
     if "planning" in result and "execution" in result:
         # 规划+执行模式
         print("规划并执行结果")
@@ -195,47 +197,27 @@ def print_result(result, verbose=0, json_output=False):
         if success:
             print("✅ 规划并执行成功")
             
-            # 规划信息
             print(f"\n📝 规划阶段:")
             print(f"  算法: {plan_result.get('algorithm', 'unknown')}")
             print(f"  规划时间: {plan_result.get('planning_time', 0):.3f}秒")
             print(f"  轨迹点数: {plan_result.get('point_count', 0)}")
             
-            # 执行信息
             print(f"\n🚀 执行阶段:")
-            print(f"  结果: {exec_result.get('result', 'N/A')}")
             print(f"  执行时间: {exec_result.get('execution_time', 0):.3f}秒")
             print(f"  方法: {exec_result.get('method', 'unknown')}")
             
-            if exec_result.get("error_code"):
-                print(f"  错误代码: {exec_result['error_code']}")
-            
-            # 总体信息
             print(f"\n📊 总体:")
             print(f"  总耗时: {result.get('total_time', 0):.3f}秒")
             
-            # 详细模式下显示更多信息
-            if verbose > 0:
-                if 'trajectory' in plan_result:
-                    traj = plan_result['trajectory']
-                    if hasattr(traj, 'points'):
-                        print(f"\n[详细] 轨迹详情:")
-                        print(f"  关节数: {len(traj.joint_names) if hasattr(traj, 'joint_names') else 'N/A'}")
-                        if len(traj.points) > 0:
-                            print(f"  第一个点: {traj.points[0].positions[:3]}...")
-                            print(f"  最后一个点: {traj.points[-1].positions[:3]}...")
+            if verbose > 0 and 'cache_hit' in result:
+                print(f"\n💾 缓存命中: {result.get('cache_hit', False)}")
                 
         else:
             print("❌ 规划或执行失败")
             if not plan_result.get("success", False):
                 print(f"  规划失败: {plan_result.get('error', '未知错误')}")
             if not exec_result.get("success", False):
-                print(f"  执行失败: {exec_result.get('error', '未知错误')}")            # 详细模式下显示错误详情
-            if verbose > 0:
-                import traceback
-                if 'exception' in result:
-                    print(f"\n[详细] 异常信息:")
-                    print(traceback.format_exc())
+                print(f"  执行失败: {exec_result.get('error', '未知错误')}")
     
     elif "stage" in result and result["stage"] == "planning_only":
         # 只规划模式
@@ -250,19 +232,9 @@ def print_result(result, verbose=0, json_output=False):
             print(f"  算法: {result.get('algorithm', 'unknown')}")
             print(f"  规划时间: {result.get('planning_time', 0):.3f}秒")
             print(f"  轨迹点数: {result.get('point_count', 0)}")
-            
-            # 详细模式
-            if verbose > 0 and 'trajectory' in result:
-                traj = result['trajectory']
-                print(f"\n[详细] 轨迹详情:")
-                print(f"  关节数: {len(traj.joint_names) if hasattr(traj, 'joint_names') else 'N/A'}")
-                if hasattr(traj, 'points') and len(traj.points) > 0:
-                    print(f"  点数量: {len(traj.points)}")
-                    print(f"  时间范围: {traj.points[0].time_from_start.sec} - {traj.points[-1].time_from_start.sec}秒")
         else:
             print("❌ 规划失败")
             print(f"  错误: {result.get('error', '未知错误')}")
-            print(f"  错误代码: {result.get('error_code', 'N/A')}")
     
     else:
         # 直接执行模式
@@ -276,22 +248,18 @@ def print_result(result, verbose=0, json_output=False):
             print(f"\n🚀 执行信息:")
             print(f"  方法: {result.get('method', 'unknown')}")
             print(f"  执行时间: {result.get('execution_time', 0):.3f}秒")
-            
         else:
             print("❌ 执行失败")
             print(f"  错误: {result.get('error', '未知错误')}")
-            print(f"  错误代码: {result.get('error_code', 'N/A')}")
     
     if 'timestamp' in result:
         print(f"\n🕒 时间: {result['timestamp']}")
     
     print("="*60)
 
+# ========== 同步执行函数 ==========
 def execute_synchronously(args):
-    """
-    同步执行函数 - 避免异步问题
-    这是关键修复：使用同步执行避免异步死锁
-    """
+    """同步执行函数"""
     print("\n🔧 使用同步执行模式")
     
     try:
@@ -299,44 +267,39 @@ def execute_synchronously(args):
         if not rclpy.ok():
             rclpy.init(args=sys.argv)
         
-        # 创建规划场景客户端
-        scene_client = None
-        if not args.no_ros:
-            try:
-                scene_client = PlanningSceneClient()
-                print("✅ 创建PlanningSceneClient成功")
-            except Exception as e:
-                print(f"⚠️ 创建PlanningSceneClient失败: {e}")
-                if not args.no_ros:
-                    return {"success": False, "error": f"PlanningSceneClient失败: {e}"}
-                
-        # 创建轨迹执行管理器
+        # 【关键修改】不再创建 PlanningSceneClient
+        # 直接创建轨迹执行管理器
         print("🔧 创建轨迹执行管理器...")
-        if args.no_ros:
-            executor = TrajectoryExecutionManager(None, use_controller_plugin=False)
-        else:
-            executor = TrajectoryExecutionManager(scene_client, use_controller_plugin=True)
-        # 【关键修改】在这里添加缓存启用
-        if args.cache:  # 需要添加这个参数
-            print("💾 启用缓存功能...")
-            if hasattr(executor, 'enable_cache'):
-                executor.enable_cache(True)
-                print("✅ 缓存已启用")
-            else:
-                print("⚠️  执行器不支持缓存功能")
         
-        # 继续原有代码...            
-        # 在创建executor后添加回退处理
+        # 根据模式创建执行器
+        if args.no_ros:
+            # 模拟模式
+            executor = TrajectoryExecutionManager(use_pymoveit2=False)
+        else:
+            # 真实模式（使用 pymoveit2）
+            executor = TrajectoryExecutionManager(use_pymoveit2=True)
+        
+        # 启用缓存
+        if args.cache and hasattr(executor, 'enable_cache'):
+            print("💾 启用缓存功能...")
+            executor.enable_cache(True)
+            print("✅ 缓存已启用")
+        
+        # 处理回退相关命令
         if args.rollback:
             print("↩️  执行轨迹回退...")
             result = executor.rollback_to_previous_state(
                 confirm=args.rollback_confirm,
                 max_wait_time=10.0
             )
+            executor.destroy()
+            return result
             
         elif args.rollback_info:
             print("📋 查看回退信息...")
             result = executor.get_rollback_info()
+            executor.destroy()
+            return result
             
         elif args.clear_rollback:
             print("🗑️  清除回退记录...")
@@ -344,84 +307,67 @@ def execute_synchronously(args):
                 executor.rollback_manager.clear_states()
                 result = {"success": True, "message": "回退记录已清除"}
             else:
-                result = {"success": False, "error": "回退管理器不可用"}    
-        # 在 rollback 处理部分后添加（约第230行后）：
+                result = {"success": False, "error": "回退管理器不可用"}
+            executor.destroy()
+            return result
+        
+        # 处理缓存相关命令
         if args.clear_cache:
             print("🗑️  清除缓存数据...")
-            # 这里需要调用缓存清理方法
-            result = {"success": True, "message": "缓存清理功能待实现"}
+            if hasattr(executor, 'clear_cache'):
+                result = executor.clear_cache()
+            else:
+                result = {"success": False, "error": "缓存清理功能不可用"}
+            executor.destroy()
             return result
 
         if args.cache_stats:
             print("📊 缓存统计信息...")
-            # 这里需要调用缓存统计方法
-            result = {"success": True, "message": "缓存统计功能待实现"}
+            if hasattr(executor, 'get_cache_stats'):
+                result = executor.get_cache_stats()
+            else:
+                result = {"success": False, "error": "缓存统计功能不可用"}
+            executor.destroy()
             return result
 
-
-        # 【删除】检查规划器可用性的代码
-        # 因为规划器现在只是模拟，不实际规划轨迹
-        # 【需要改成】：
-        # 替换原有的规划部分（约第250-280行）：
+        # 规划模式
         if args.plan:
             print(f"\n📝 开始规划...")
             print(f"  算法: {args.algorithm}")
             print(f"  规划时间: {args.planning_time}秒")
             
-            # 创建起始状态和目标状态
             start_state = create_start_state()
             goal_state = create_goal_state_from_args(args)
             
-            # 【关键修改】使用缓存版本
-            if args.cache and hasattr(executor, 'plan_and_execute_cached'):
-                print("🔄 使用缓存执行模式")
-                result = executor.plan_and_execute_cached(
-                    start_state=start_state,
+            if args.plan_only:
+                print("📝 只规划不执行...")
+                result = executor.plan_trajectory(
                     goal_state=goal_state,
                     algorithm=args.algorithm,
                     timeout=args.planning_time
                 )
+                result["stage"] = "planning_only"
             else:
-                # 原有的普通规划
-                if args.plan_only:
-                    print("📝 只规划不执行...")
-                    plan_result = executor.plan_trajectory(
-                        start_state=start_state,
+                print("🚀 规划并执行...")
+                if args.cache and hasattr(executor, 'plan_and_execute_cached'):
+                    print("🔄 使用缓存执行模式")
+                    result = executor.plan_and_execute_cached(
                         goal_state=goal_state,
                         algorithm=args.algorithm,
                         timeout=args.planning_time
                     )
-                    
-                    return {
-                        "success": plan_result.get("success", False),
-                        "plan_result": plan_result,
-                        "stage": "planning_only",
-                        "has_trajectory": "trajectory" in plan_result
-                    }
                 else:
-                    print("🚀 规划并执行...")
                     result = executor.plan_and_execute(
-                        start_state=start_state,
                         goal_state=goal_state,
                         algorithm=args.algorithm,
                         timeout=args.planning_time
                     )
             
+            executor.destroy()
             return result
-                
+        
+        # 其他命令
         else:
-            # 原有逻辑：使用预设轨迹
-            # 配置执行参数
-            config_update = {}
-            if args.velocity != 1.0:
-                config_update["max_velocity_scaling"] = args.velocity
-            if args.acceleration != 1.0:
-                config_update["max_acceleration_scaling"] = args.acceleration
-            
-            if config_update:
-                executor.set_config(config_update)
-            
-            # 处理不同命令
             if args.stop:
                 print("🛑 停止当前执行...")
                 result = executor.stop()
@@ -438,7 +384,8 @@ def execute_synchronously(args):
                 print(f"📜 显示执行历史 (最近{args.history}条)...")
                 result = executor.get_execution_history(args.history)
             
-            else:                # 创建轨迹
+            else:
+                # 执行预设轨迹
                 if args.zero:
                     print("🎯 创建零位置轨迹")
                     trajectory = create_zero_trajectory()
@@ -446,17 +393,12 @@ def execute_synchronously(args):
                     print(f"🎯 创建测试轨迹 ({args.points} 个点)")
                     trajectory = create_panda_trajectory(points_count=args.points)
                 
-                # 执行轨迹 - 使用同步方法
                 print("🚀 开始执行轨迹...")
                 start_time = time.time()
                 result = executor.execute_sync(trajectory, wait=True)
-                
-                # 添加总耗时
                 result["total_elapsed_time"] = time.time() - start_time
             
-            # 清理资源
             executor.destroy()
-            
             return result
             
     except KeyboardInterrupt:
@@ -472,40 +414,45 @@ def execute_synchronously(args):
 # ========== 主函数 ==========
 def main():
     parser = argparse.ArgumentParser(
-        description='轨迹执行工具 - 稳定版',
+        description='轨迹执行工具 - pymoveit2 版',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 示例:
   ros-start-execution                    # 默认3点轨迹
-  ros-start-execution --plan             # 规划模式（模拟）
-  ros-start-execution --plan-only        # 只规划不执行（模拟）
+  ros-start-execution --plan             # 规划模式
+  ros-start-execution --plan-only        # 只规划不执行
+  ros-start-execution --object-id test_cube  # 抓取物体
   ros-start-execution --zero             # 零位置轨迹
   ros-start-execution --velocity 0.5     # 半速执行
   ros-start-execution --no-ros           # 模拟模式
   ros-start-execution --status           # 查看状态
-  ros-start-execution --rollback
-  ros-start-execution --rollback-info
-注意: --plan 参数目前为模拟模式，实际规划功能待实现
+  ros-start-execution --rollback         # 回退
         '''
     )
 
     # 规划相关参数
     parser.add_argument('--plan', '-P', action='store_true',
-                       help='使用规划器生成轨迹（而不是预设轨迹）')
+                       help='使用规划器生成轨迹')
     parser.add_argument('--plan-only', action='store_true',
                        help='只规划不执行')
     parser.add_argument('--goal-joints', type=str,
                        help='目标关节角度，逗号分隔，如 "0,0.5,0,-1,0,1,0"')
     parser.add_argument('--goal-pose', type=str,
-                       help='目标末端位姿，格式: "x,y,z,roll,pitch,yaw" 或 "x,y,z,qx,qy,qz,qw"')
+                       help='目标末端位姿，格式: "x,y,z,qx,qy,qz,qw"')
     parser.add_argument('--algorithm', '-a', type=str, default='rrt_connect',
                        help='规划算法 (默认: rrt_connect)')
     parser.add_argument('--planning-time', type=float, default=5.0,
                        help='规划超时时间(秒) (默认: 5.0)')
     
-    # 轨迹参数（当不使用规划时）
+    # 物体ID参数
+    parser.add_argument('--object-id', type=str,
+                       help='物体ID，自动获取抓取位姿')
+    parser.add_argument('--list-objects', action='store_true',
+                       help='列出所有预定义的物体ID')
+    
+    # 轨迹参数
     parser.add_argument('--points', '-p', type=int, default=3,
-                       help='轨迹点数 (默认: 3，当不使用规划时)')
+                       help='轨迹点数 (默认: 3)')
     parser.add_argument('--zero', '-z', action='store_true',
                        help='使用零位置轨迹')
     parser.add_argument('--velocity', type=float, default=1.0,
@@ -523,6 +470,24 @@ def main():
     parser.add_argument('--history', type=int,
                        help='查看历史记录')
     
+    # 缓存相关
+    parser.add_argument('--cache', '-c', action='store_true',
+                       help='启用缓存功能')
+    parser.add_argument('--clear-cache', action='store_true',
+                       help='清除所有缓存数据')
+    parser.add_argument('--cache-stats', action='store_true',
+                       help='显示缓存统计信息')
+    
+    # 回退相关
+    parser.add_argument('--rollback', '-r', action='store_true',
+                       help='回退到执行前的状态')
+    parser.add_argument('--rollback-info', action='store_true',
+                       help='查看回退信息')
+    parser.add_argument('--rollback-confirm', action='store_true',
+                       help='交互式确认回退')
+    parser.add_argument('--clear-rollback', action='store_true',
+                       help='清除所有回退记录')
+    
     # 输出选项
     parser.add_argument('--output', '-o', type=str,
                        help='保存结果到文件')
@@ -534,71 +499,51 @@ def main():
     # 运行模式
     parser.add_argument('--no-ros', action='store_true',
                        help='模拟模式 (不连接ROS)')
-    parser.add_argument('--sync', action='store_true',
-                       help='强制使用同步模式 (默认已启用)')
-    # 在argparse部分添加：
-    parser.add_argument('--rollback', '-r', action='store_true',
-                    help='回退到执行前的状态')
-    parser.add_argument('--rollback-info', action='store_true',
-                    help='查看回退信息')
-    parser.add_argument('--rollback-confirm', action='store_true',
-                    help='交互式确认回退')
-    parser.add_argument('--clear-rollback', action='store_true',
-                    help='清除所有回退记录')    
-    # 在ArgumentParser中添加（约第420行后）：
-    parser.add_argument('--cache', '-c', action='store_true',
-                    help='启用缓存功能')
-    parser.add_argument('--cache-dir', type=str, default='~/.robot_grasp_cache',
-                    help='缓存目录路径 (默认: ~/.robot_grasp_cache)')
-    parser.add_argument('--clear-cache', action='store_true',
-                    help='清除所有缓存数据')
-    parser.add_argument('--cache-stats', action='store_true',
-                    help='显示缓存统计信息')    
-    # 在ArgumentParser中添加物体ID参数
-    parser.add_argument('--object-id', type=str,
-                    help='物体ID，自动获取抓取位姿')
-    parser.add_argument('--list-objects', action='store_true',
-                    help='列出所有预定义的物体ID')    
+    
     args = parser.parse_args()
     
     # 检查依赖
     if not HAS_DEPENDENCIES and not args.no_ros:
         print("❌ 缺少必要依赖")
+        print("   请确保已编译 pymoveit2 并 source install/setup.bash")
         return 1
     
     print(f"\n{'='*60}")
     print(f"轨迹执行器 - 启动")
     print(f"{'='*60}")
+    
     if args.list_objects:
         list_predefined_objects()
-        return 0    
+        return 0
+    
     # 显示模式信息
     if args.plan:
         print(f"模式: {'只规划' if args.plan_only else '规划并执行'}")
         print(f"算法: {args.algorithm}")
         print(f"规划时间: {args.planning_time}秒")
+        if args.object_id:
+            print(f"物体ID: {args.object_id}")
     else:
         print(f"模式: {'模拟' if args.no_ros else '真实控制器'}")
         print(f"轨迹: {'零位置' if args.zero else f'{args.points}点'}")
         if args.velocity != 1.0 or args.acceleration != 1.0:
             print(f"速度: {args.velocity:.1f}x, 加速度: {args.acceleration:.1f}x")
     
+    if args.cache:
+        print(f"缓存: 启用")
+    
     print(f"{'='*60}")
     
     try:
-        # 使用同步执行（避免异步问题）
         result = execute_synchronously(args)
         
-        # 输出结果
         if args.output and result:
             with open(args.output, 'w', encoding='utf-8') as f:
                 json.dump(result, f, indent=2, default=str)
             print(f"\n📁 结果已保存到: {args.output}")
         
-        # 显示结果
         print_result(result, verbose=args.verbose, json_output=args.json)
         
-        # 返回退出码
         return 0 if result.get('success', False) else 1
         
     except KeyboardInterrupt:
@@ -609,5 +554,7 @@ def main():
         import traceback
         traceback.print_exc()
         return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())  # 确保有这一行！    
+    sys.exit(main())

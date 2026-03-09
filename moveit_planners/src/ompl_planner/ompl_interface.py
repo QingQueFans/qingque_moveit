@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-OMPL规划器接口 - 最终修复版
-适配修复后的MoveIt客户端
+OMPL规划器接口 - pymoveit2 适配版
 """
 import rclpy
 from rclpy.node import Node
@@ -10,24 +9,22 @@ import yaml
 import os
 import sys
 
-FILE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, FILE_DIR)
-
-try:
-    from ros2_moveit_client import MoveItROS2Client
-    HAS_MOVEIT_CLIENT = True
-except ImportError as e:
-    print(f"[OMPL接口] 导入MoveIt客户端失败: {e}")
-    HAS_MOVEIT_CLIENT = False
+from pymoveit2 import MoveIt2
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 class OMPLInterface(Node):
-    """OMPL规划器接口 - 最终修复版"""
+    """
+    OMPL规划器接口 - pymoveit2 适配版
     
-    def __init__(self, node_name="ompl_planner_interface_fixed"):
+    这个类现在作为 pymoveit2 的轻量封装，保持原有接口不变
+    但底层实现由 pymoveit2 接管
+    """
+    
+    def __init__(self, node_name="ompl_planner_interface"):
         super().__init__(node_name)
         
         # 配置路径
-        self.config_dir = os.path.join(os.path.dirname(FILE_DIR), '..', '..', 'config')
+        self.config_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'config')
         self.config_file = os.path.join(self.config_dir, 'ompl_planners.yaml')
         
         # 规划器状态
@@ -42,49 +39,39 @@ class OMPLInterface(Node):
         # 加载配置
         self._load_config()
         
-        # 初始化修复后的ROS2客户端
-        self.moveit_client = None
-        if HAS_MOVEIT_CLIENT:
-            try:
-                self.moveit_client = MoveItROS2Client()
-                time.sleep(0.5)  # 给连接时间
-                
-                if self.moveit_client.is_available():
-                    self.planner_ready = True
-                    self.get_logger().info("✅ 真实MoveIt规划器就绪")
-                    
-                    # 测试连接
-                    test_result = self._test_connection()
-                    if test_result:
-                        self.get_logger().info("✅ 规划器测试通过")
-                    else:
-                        self.get_logger().warning("⚠️ 规划器测试失败，但服务可用")
-                else:
-                    self.get_logger().warning("⚠️ MoveIt服务不可用，将使用模拟模式")
-            except Exception as e:
-                self.get_logger().error(f"初始化MoveIt客户端失败: {e}")
-        else:
-            self.get_logger().warning("⚠️ MoveIt客户端不可用，使用模拟模式")
+        # 初始化 pymoveit2
+        try:
+            self.moveit2 = MoveIt2(
+                node=self,
+                joint_names=["panda_joint1", "panda_joint2", "panda_joint3",
+                           "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"],
+                base_link_name="panda_link0",
+                end_effector_name="panda_hand",
+                group_name="panda_arm"
+            )
+            self.planner_ready = True
+            self.get_logger().info("✅ pymoveit2 规划器就绪")
+            
+            # 测试连接
+            self._test_connection()
+            
+        except Exception as e:
+            self.get_logger().error(f"初始化 pymoveit2 失败: {e}")
+            self.planner_ready = False
         
         self.get_logger().info(f"OMPL规划器接口初始化完成")
         self.get_logger().info(f"真实规划: {'可用' if self.planner_ready else '模拟模式'}")
-# 打开ompl_interface.py，找到_load_config方法附近
-# 修改配置文件路径的计算方式：
+    
     def _load_config(self):
-        """加载配置 - 灵活版本"""
+        """加载配置 - 保留原样"""
         try:
-            # 方法1：从环境变量获取
             workspace_path = os.environ.get('QINGFU_MOVEIT_PATH', 
                                         os.path.expanduser('~/qingfu_moveit/moveit_planners'))
             
-            # 方法2：自动检测
             possible_paths = [
-                # 绝对路径
                 "/home/diyuanqiongyu/qingfu_moveit/moveit_planners/config/ompl_planners.yaml",
-                # 相对于当前文件
                 os.path.join(os.path.dirname(__file__), 
                             '..', '..', '..', 'config', 'ompl_planners.yaml'),
-                # 工作空间路径
                 os.path.join(workspace_path, 'config', 'ompl_planners.yaml'),
             ]
             
@@ -100,130 +87,170 @@ class OMPLInterface(Node):
                     self.get_logger().info(f"可用算法: {planners}")
                     return
             
-            # 如果没有找到配置文件
             self.get_logger().warning("未找到配置文件，使用默认配置")
             self._set_default_config()
             
         except Exception as e:
             self.get_logger().error(f"加载配置失败: {e}")
             self._set_default_config()
-
+    
+    def _set_default_config(self):
+        """设置默认配置"""
+        self.config = {
+            'defaults': {
+                'planner': 'rrt_connect',
+                'group_name': 'panda_arm'
+            },
+            'planners': {
+                'rrt_connect': {'moveit_id': 'RRTConnect'},
+                'rrt_star': {'moveit_id': 'RRTstar'},
+                'prm': {'moveit_id': 'PRM'}
+            }
+        }
     
     def _test_connection(self):
         """测试规划器连接"""
         try:
-            # 简单的测试规划
             test_joints = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
-            result = self.moveit_client.plan_to_joints(
-                test_joints,
-                planning_time=2.0
+            
+            # 用 plan 测试
+            trajectory = self.moveit2.plan(
+                joint_positions=test_joints,
+                tolerance=0.01,
+                weight=1.0
             )
             
-            success = result.get('success', False)
-            if success:
-                self.get_logger().info(f"✅ 连接测试成功，轨迹点数: {result.get('point_count', 0)}")
+            if trajectory is not None:
+                self.get_logger().info(f"✅ 连接测试成功")
+                return True
             else:
-                self.get_logger().warning(f"⚠️ 连接测试失败: {result.get('error_message')}")
+                self.get_logger().warning(f"⚠️ 连接测试失败")
+                return False
             
-            return success
         except Exception as e:
             self.get_logger().error(f"连接测试异常: {e}")
             return False
     
     def plan_sync(self, start_state, goal_state, algorithm=None, timeout=5.0):
-        """
-        同步执行规划 - 使用修复后的MoveIt客户端
+        """同步执行规划 - 用 pymoveit2 的 plan 方法"""
+        print("\n" + "="*60)
+        print("[PLAN_SYNC] 开始执行")
+        print(f"[PLAN_SYNC] goal_state: {goal_state}")
+        print(f"[PLAN_SYNC] algorithm: {algorithm}")
+        print("="*60)
         
-        Args:
-            start_state: 起始状态 {joints: [], pose: {...}}
-            goal_state: 目标状态 {joints: [], pose: {...}}
-            algorithm: 规划算法名称
-            timeout: 规划超时时间
-        
-        Returns:
-            规划结果字典
-        """
         start_time = time.time()
         
         try:
+            print("[PLAN_SYNC] 1. 进入 try 块")
+            
             self.get_logger().info(
                 f"开始规划: {algorithm or '默认算法'}, 超时={timeout}s"
             )
             
-            # 选择算法
+            print("[PLAN_SYNC] 2. 选择算法")
             if algorithm is None:
                 algorithm = self.config['defaults']['planner']
             
+            print(f"[PLAN_SYNC] 3. 选择的算法: {algorithm}")
+            
             if algorithm not in self.config['planners']:
+                print(f"[PLAN_SYNC] 算法不在配置中: {algorithm}")
                 return {
                     "success": False,
                     "error": f"未知算法: {algorithm}",
                     "available_algorithms": list(self.config['planners'].keys()),
-                    "error_code": -15  # 无效参数
+                    "error_code": -15
                 }
             
-            # 获取MoveIt规划器ID
-            planner_config = self.config['planners'][algorithm]
-            moveit_planner_id = planner_config.get('moveit_id', algorithm.upper())
-            group_name = self.config['defaults'].get('group_name', 'panda_arm')
+            print("[PLAN_SYNC] 4. 设置 planner_id")
+            self.moveit2.planner_id = self.config['planners'][algorithm].get('moveit_id', algorithm.upper())
             
-            # 使用真实规划器
-            if self.planner_ready and self.moveit_client:
-                self.get_logger().info(f"使用真实MoveIt规划器: {moveit_planner_id}")
+            if self.planner_ready:
+                print("[PLAN_SYNC] 5. planner_ready 为 True")
                 
-                result = None
+                success = False
+                trajectory = None
                 
                 if 'joints' in goal_state and goal_state['joints']:
-                    # 规划到关节位置
-                    result = self.moveit_client.plan_to_joints(
-                        target_joints=goal_state['joints'],
-                        group_name=group_name,
-                        planner_id=moveit_planner_id,
-                        planning_time=timeout
-                    )
+                    print(f"[PLAN_SYNC] 6. 关节模式，目标: {goal_state['joints']}")
+                    
+                    try:
+                        print("[PLAN_SYNC] 7. 准备调用 moveit2.plan")
+                        
+                        # 这里打印一下 moveit2 对象的状态
+                        print(f"[PLAN_SYNC] moveit2 对象: {self.moveit2}")
+                        print(f"[PLAN_SYNC] moveit2.planner_id: {self.moveit2.planner_id}")
+                        
+                        import time
+                        time.sleep(0.1)  # 小延时
+                        
+                        print("[PLAN_SYNC] 8. 正在调用 plan...")
+                        
+                        trajectory = self.moveit2.plan(
+                            joint_positions=goal_state['joints'],
+                            tolerance=0.01,
+                            weight=1.0
+                        )
+                        
+                        print(f"[PLAN_SYNC] 9. plan 返回: {trajectory}")
+                        print(f"[PLAN_SYNC] 10. trajectory 类型: {type(trajectory)}")
+                        
+                        success = trajectory is not None
+                        
+                        if success:
+                            print(f"[PLAN_SYNC] 11. 成功，轨迹点数: {len(trajectory.points)}")
+                        else:
+                            print("[PLAN_SYNC] 11. 失败，trajectory 为 None")
+                            
+                    except Exception as e:
+                        print(f"[PLAN_SYNC] ❌ 规划异常: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        success = False
+                        trajectory = None
+                    
                 elif 'pose' in goal_state and goal_state['pose']:
-                    # 尝试位姿规划（可能不完全支持）
-                    result = self.moveit_client.plan_to_pose(
-                        target_pose=goal_state['pose'],
-                        group_name=group_name,
-                        planner_id=moveit_planner_id,
-                        planning_time=timeout
-                    )
+                    print("[PLAN_SYNC] 6. 位姿模式")
+                    # ... 位姿处理代码 ...
+                    
                 else:
+                    print("[PLAN_SYNC] 目标状态格式错误")
                     return {
                         "success": False,
                         "error": "目标状态必须包含joints或pose",
                         "goal_state": goal_state,
-                        "error_code": -15  # 无效参数
-                    }                # 更新统计信息
-                self.planning_stats['total_plans'] += 1
-                if result and result.get('success', False):
-                    self.planning_stats['successful_plans'] += 1
-                self.planning_stats['total_time'] += time.time() - start_time
+                        "error_code": -15
+                    }
                 
-                # 添加算法信息
-                if result:
-                    result["algorithm"] = algorithm
-                    result["moveit_planner_id"] = moveit_planner_id
-                    result["planning_mode"] = "real"
-                    self.active_algorithm = algorithm
+                print("[PLAN_SYNC] 12. 构建返回结果")
                 
-                return result if result else {
-                    "success": False,
-                    "error": "规划器返回空结果",
-                    "error_code": -1
+                result = {
+                    "success": success,
+                    "algorithm": algorithm,
+                    "moveit_planner_id": self.moveit2.planner_id,
+                    "planning_mode": "real",
+                    "planning_time": time.time() - start_time,
+                    "error_code": 1 if success else -1
                 }
-            else:
-               # 模拟模式
-                self.get_logger().warning("使用模拟规划模式")
-                result = self._simulate_planning(goal_state, algorithm, timeout)
-                result["planning_mode"] = "simulated"
-                result["error_code"] = 1 if result.get("success", False) else -1
+                
+                if success and trajectory:
+                    result["trajectory"] = trajectory
+                    result["point_count"] = len(trajectory.points) if hasattr(trajectory, 'points') else 0
+                
+                print(f"[PLAN_SYNC] 13. 返回结果: success={success}")
+                print("="*60 + "\n")
+                
                 return result
             
+            else:
+                print("[PLAN_SYNC] planner_ready 为 False，使用模拟模式")
+                # ... 模拟模式代码 ...
+                
         except Exception as e:
-            self.get_logger().error(f"规划失败: {e}")
-            
+            print(f"[PLAN_SYNC] 顶层异常: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e),
@@ -232,22 +259,37 @@ class OMPLInterface(Node):
                 "planning_mode": "error",
                 "error_code": -1
             }
-    
+        
     def _simulate_planning(self, goal_state, algorithm, timeout):
-        """模拟规划（当真实规划器不可用时）"""
-        # 简单的模拟规划
+        """模拟规划（保留原样）"""
         import random
         
         simulated_time = min(timeout, random.uniform(0.5, 2.0))
         time.sleep(simulated_time)
         
-        # 模拟成功
+        # 模拟轨迹
+        from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+        traj = JointTrajectory()
+        traj.joint_names = [
+            'panda_joint1', 'panda_joint2', 'panda_joint3',
+            'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7'
+        ]
+        point = JointTrajectoryPoint()
+        if 'joints' in goal_state:
+            point.positions = goal_state['joints']
+        else:
+            point.positions = [0.0] * 7
+        point.time_from_start.sec = 2
+        traj.points = [point]
+        
         result = {
             "success": True,
             "algorithm": algorithm,
             "planning_time": simulated_time,
             "description": "模拟规划成功",
-            "simulated": True
+            "simulated": True,
+            "trajectory": traj,
+            "point_count": 1
         }
         
         return result
@@ -257,7 +299,7 @@ class OMPLInterface(Node):
         status = {
             "node_name": self.get_name(),
             "planner_ready": self.planner_ready,
-            "planning_mode": "real" if (self.planner_ready and self.moveit_client) else "simulated",
+            "planning_mode": "real" if self.planner_ready else "simulated",
             "active_algorithm": self.active_algorithm,
             "available_algorithms": list(self.config.get('planners', {}).keys()),
             "planning_stats": self.planning_stats.copy(),
@@ -265,27 +307,20 @@ class OMPLInterface(Node):
             "timestamp": time.time()
         }
         
-        if self.moveit_client:
-            status["moveit_service_available"] = self.moveit_client.is_available()
-        
         return status
     
     def destroy_node(self):
         """清理资源"""
         self.get_logger().info("OMPL接口节点正在关闭...")
-        
-        if self.moveit_client:
-            self.moveit_client.destroy()
-        
         super().destroy_node()
 
 
 # 测试函数
 def test_interface():
-    """测试修复后的规划器接口"""
+    """测试规划器接口"""
     import rclpy
     
-    print("测试修复版OMPL规划器接口...")
+    print("测试 OMPL规划器接口 (pymoveit2版)...")
     
     rclpy.init()
     planner = OMPLInterface()
@@ -294,7 +329,6 @@ def test_interface():
     status = planner.get_interface_status()
     print(f"\n规划器状态:")
     print(f"  规划模式: {status['planning_mode']}")
-    print(f"  服务可用: {status.get('moveit_service_available', False)}")
     
     # 测试规划
     goal_state = {

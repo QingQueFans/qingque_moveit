@@ -1,31 +1,53 @@
 #!/usr/bin/env python3
 """
-从 PlanningScene 移除碰撞物体并清除缓存
+从 PlanningScene 移除碰撞物体并清除缓存 - pymoveit2 版
 """
 import sys
 import os
 import argparse
 import json
 import time
+import fnmatch
 
 sys.path.append(os.path.expanduser('~/qingfu_moveit/moveit_core/planning_scene'))
 
-# ========== 关键：设置正确的路径 ==========
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # scripts/
-MODULE_ROOT = os.path.dirname(SCRIPT_DIR)                # collision_objects/
-PROJECT_ROOT = os.path.dirname(MODULE_ROOT)              # planning_scene/
+# ========== 路径设置（原样保留） ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
 
-# 添加 core_functions 的 src 到路径
 CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
 sys.path.insert(0, CORE_SRC)
 
-# 添加 collision_objects 的 src 到路径
 OBJ_SRC = os.path.join(MODULE_ROOT, 'src')
 sys.path.insert(0, OBJ_SRC)
 
-# 现在可以正常导入
-from ps_core.scene_client import PlanningSceneClient
+# ========== 导入 ==========
+import rclpy
+from rclpy.node import Node
+from pymoveit2 import MoveIt2
+
 from ps_objects.object_manager import ObjectManager
+
+
+def create_moveit2_node():
+    """创建 MoveIt2 实例"""
+    if not rclpy.ok():
+        rclpy.init()
+    
+    node = Node("remove_object_node")
+    
+    moveit2 = MoveIt2(
+        node=node,
+        joint_names=["panda_joint1", "panda_joint2", "panda_joint3",
+                     "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"],
+        base_link_name="panda_link0",
+        end_effector_name="panda_hand",
+        group_name="panda_arm"
+    )
+    
+    return node, moveit2
+
 
 def remove_from_cache(object_ids, cache_file, verbose=True):
     """从缓存文件中移除物体"""
@@ -61,6 +83,7 @@ def remove_from_cache(object_ids, cache_file, verbose=True):
         print(f"❌ 移除缓存失败: {e}")
         return False
 
+
 def clear_entire_cache(cache_file, verbose=True):
     """清除整个缓存"""
     try:
@@ -71,7 +94,6 @@ def clear_entire_cache(cache_file, verbose=True):
             if verbose:
                 print(f"✅ 已清除缓存文件: {cache_file}")
             
-            # 如果缓存目录为空，也删除目录
             if os.path.exists(cache_dir) and not os.listdir(cache_dir):
                 os.rmdir(cache_dir)
                 if verbose:
@@ -87,9 +109,10 @@ def clear_entire_cache(cache_file, verbose=True):
         print(f"❌ 清除缓存失败: {e}")
         return False
 
+
 def main():
     parser = argparse.ArgumentParser(
-        description="从 PlanningScene 移除碰撞物体并清除缓存",
+        description="从 PlanningScene 移除碰撞物体并清除缓存 - pymoveit2 版",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -116,7 +139,7 @@ def main():
         """
     )
     
-    # 物体ID参数（位置参数）
+    # 物体ID参数
     parser.add_argument('object_ids', type=str, nargs='*',
                        help='要移除的物体ID（多个用空格分隔）')
     
@@ -137,7 +160,9 @@ def main():
     parser.add_argument('--keep-cache', '-k', action='store_true',
                        help='不移除缓存，只移除场景物体')
     parser.add_argument('--clear-all-cache', '-C', action='store_true',
-                       help='清除整个缓存（包括所有物体数据）')    # 高级选项
+                       help='清除整个缓存（包括所有物体数据）')
+    
+    # 高级选项
     parser.add_argument('--dry-run', '-d', action='store_true',
                        help='只显示要移除的物体，不实际执行')
     parser.add_argument('--yes', '-y', action='store_true',
@@ -152,10 +177,14 @@ def main():
     # 缓存文件路径
     cache_file = os.path.expanduser('~/.planning_scene_cache/objects.json')
     
+    # 初始化 ROS2 和 MoveIt2
+    node, moveit2 = create_moveit2_node()
+    
     try:
-        # 初始化客户端和工具
-        client = PlanningSceneClient()
-        manager = ObjectManager(client)
+        # 初始化管理器
+        manager = ObjectManager(moveit2)
+        
+        # 从缓存获取物体列表（不是场景）
         current_objects = manager.list_objects()
         
         # === 只清除缓存的模式 ===
@@ -165,7 +194,6 @@ def main():
                 print("=" * 40)
             
             if args.clear_all_cache:
-                # 清除整个缓存
                 if not args.dry_run:
                     success = clear_entire_cache(cache_file, not args.silent)
                     return 0 if success else 1
@@ -173,7 +201,6 @@ def main():
                     print(f"⏸️  干运行：将清除缓存文件: {cache_file}")
                     return 0
             elif args.object_ids:
-                # 从缓存中移除指定物体
                 if not args.silent:
                     print(f"将从缓存中移除 {len(args.object_ids)} 个物体")
                 
@@ -189,20 +216,17 @@ def main():
         
         # === 正常模式：移除场景物体 ===
         if not args.silent:
-            print(f"当前场景中有 {len(current_objects)} 个物体")
+            print(f"缓存中有 {len(current_objects)} 个物体记录")
         
         # 确定要移除的物体列表
         objects_to_remove = []
         
         if args.all:
-            # 移除所有物体
             objects_to_remove = current_objects.copy()
             if not args.silent:
                 print(f"将移除所有 {len(objects_to_remove)} 个物体")
                 
         elif args.pattern:
-            # 使用模式匹配
-            import fnmatch
             pattern = args.pattern
             matched_objects = []
             
@@ -216,16 +240,16 @@ def main():
                 for obj in objects_to_remove:
                     print(f"  - {obj}")
         
-        elif args.interactive:            # 交互式选择
+        elif args.interactive:
             if not current_objects:
-                print("场景中没有物体")
+                print("缓存中没有物体记录")
                 return 0
             
-            print(f"\n当前场景中有 {len(current_objects)} 个物体:")
+            print(f"\n缓存中有 {len(current_objects)} 个物体记录:")
             for i, obj_id in enumerate(current_objects):
-                obj_info = manager.get_object_info(obj_id)
-                if obj_info and obj_info.get('primitive_count', 0) > 0:
-                    print(f"{i+1:2d}. {obj_id} (形状数量: {obj_info['primitive_count']})")
+                cached = manager.get_object_from_cache(obj_id)
+                if cached:
+                    print(f"{i+1:2d}. {obj_id} (类型: {cached.get('type', 'unknown')})")
                 else:
                     print(f"{i+1:2d}. {obj_id}")
             
@@ -249,17 +273,15 @@ def main():
                     return 1
         
         elif args.from_file:
-            # 从文件读取
             try:
                 with open(args.from_file, 'r') as f:
                     file_objects = [line.strip() for line in f if line.strip()]
                 
-                # 只移除存在的物体
                 for obj_id in file_objects:
                     if obj_id in current_objects:
                         objects_to_remove.append(obj_id)
                     elif not args.force:
-                        print(f"警告: 物体 '{obj_id}' 不存在")
+                        print(f"警告: 物体 '{obj_id}' 不在缓存中")
                 
                 if not args.silent:
                     print(f"从文件读取到 {len(file_objects)} 个物体，其中 {len(objects_to_remove)} 个存在")
@@ -269,33 +291,31 @@ def main():
                 return 1
         
         else:
-            # 使用命令行参数指定的物体ID
             for obj_id in args.object_ids:
                 if obj_id in current_objects:
                     objects_to_remove.append(obj_id)
                 elif not args.force:
-                    print(f"错误: 物体 '{obj_id}' 不存在")
+                    print(f"错误: 物体 '{obj_id}' 不存在于缓存中")
                     if not args.silent:
-                        print(f"当前存在的物体: {', '.join(current_objects)}")
+                        print(f"当前缓存中的物体: {', '.join(current_objects)}")
                     return 1
-        # 特殊处理：如果使用 --all --clear-all-cache，强制清除缓存
+        
+        # 特殊处理：--all --clear-all-cache
         if args.all and args.clear_all_cache:
             if not args.silent:
                 print("=" * 50)
                 print("特殊模式：--all --clear-all-cache")
                 print("将执行以下操作：")
-                print("  1. 移除所有场景物体（如果存在）")
+                print("  1. 移除所有场景物体（通过缓存操作）")
                 print("  2. 清除整个缓存文件")
                 print("=" * 50)
             
-            # 1. 先尝试移除场景物体（如果有）
             scene_removed = 0
             if objects_to_remove:
                 if not args.silent:
                     print(f"\n正在移除 {len(objects_to_remove)} 个场景物体...")
                 
                 if not args.dry_run:
-                    # 使用批量移除
                     success = manager.remove_objects_simple(objects_to_remove)
                     if success:
                         scene_removed = len(objects_to_remove)
@@ -308,9 +328,8 @@ def main():
                         print(f"⏸️  干运行：将从场景移除 {len(objects_to_remove)} 个物体")
             else:
                 if not args.silent:
-                    print("ℹ️  场景中没有物体需要移除")
+                    print("ℹ️  缓存中没有物体需要移除")
             
-            # 2. 无论如何都要清除缓存
             if not args.dry_run:
                 if not args.silent:
                     print(f"\n正在清除整个缓存...")
@@ -324,14 +343,12 @@ def main():
                 if not args.silent:
                     print(f"⏸️  干运行：将清除缓存文件: {cache_file}")
             
-            # 总结
             if not args.silent:
                 print(f"\n操作完成！")
                 print(f"  从场景移除: {scene_removed} 个物体")
                 print(f"  缓存清除: 已完成")
             
             return 0
-        
         
         # 检查是否有要移除的物体
         if not objects_to_remove:
@@ -344,7 +361,6 @@ def main():
             for obj_id in objects_to_remove:
                 print(f"  - {obj_id}")
             
-            # 显示缓存操作信息
             if args.keep_cache:
                 print("⚠️  注意：将保留缓存中的数据")
             else:
@@ -362,11 +378,12 @@ def main():
                 confirm = input(f"\n确认移除 {len(objects_to_remove)} 个物体并清除缓存？(y/N): ")
             if confirm.lower() != 'y':
                 print("取消操作")
-                return 0        # === 1. 首先移除场景物体 ===
+                return 0
+        
+        # === 1. 首先移除场景物体 ===
         scene_removal_success = False
         
         if len(objects_to_remove) == 1:
-            # 单个物体移除
             obj_id = objects_to_remove[0]
             if not args.silent:
                 print(f"正在移除场景物体 '{obj_id}'...")
@@ -381,7 +398,6 @@ def main():
                 print(f"❌ 移除场景物体 '{obj_id}' 失败")
                 return 1
         else:
-            # 批量移除
             if not args.silent:
                 print(f"正在批量移除 {len(objects_to_remove)} 个场景物体...")
             
@@ -392,7 +408,6 @@ def main():
                     print(f"✅ 成功从场景移除 {len(objects_to_remove)} 个物体")
                 scene_removal_success = True
                 
-                # 验证移除结果
                 time.sleep(0.3)
                 remaining_objects = manager.list_objects()
                 removed_count = len(objects_to_remove)
@@ -411,16 +426,13 @@ def main():
         
         # === 2. 然后处理缓存 ===
         if not args.keep_cache and scene_removal_success:
-            # 等待一小段时间，确保场景更新完成
             time.sleep(0.1)
             
             if args.clear_all_cache:
-                # 清除整个缓存
                 if not args.silent:
                     print("\n正在清除整个缓存...")
                 cache_success = clear_entire_cache(cache_file, not args.silent)
             else:
-                # 只移除相关物体的缓存
                 if not args.silent:
                     print(f"\n正在从缓存中移除 {len(objects_to_remove)} 个物体...")
                 cache_success = remove_from_cache(objects_to_remove, cache_file, not args.silent)
@@ -452,6 +464,11 @@ def main():
         import traceback
         traceback.print_exc()
         return 1
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
 
 if __name__ == "__main__":
     sys.exit(main())

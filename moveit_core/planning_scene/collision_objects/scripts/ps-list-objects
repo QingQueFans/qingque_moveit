@@ -1,30 +1,56 @@
 #!/usr/bin/env python3
 """
-列出 PlanningScene 中的所有碰撞物体
+列出 PlanningScene 中的所有碰撞物体 - pymoveit2 版
 """
 import sys
 import os
 import argparse
 import time
-# 添加这一行
-sys.path.append(os.path.expanduser('~/qingfu_moveit/moveit_core/planning_scene'))
-# ========== 关键：设置正确的路径 ==========
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # scripts/
-MODULE_ROOT = os.path.dirname(SCRIPT_DIR)                # collision_objects/
-PROJECT_ROOT = os.path.dirname(MODULE_ROOT)              # planning_scene/
+import fnmatch
+import json
 
-# 添加 core_functions 的 src 到路径
+# ========== 路径设置（原样保留） ==========
+sys.path.append(os.path.expanduser('~/qingfu_moveit/moveit_core/planning_scene'))
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
+
 CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
 sys.path.insert(0, CORE_SRC)
 
-# 添加 collision_objects 的 src 到路径
 OBJ_SRC = os.path.join(MODULE_ROOT, 'src')
 sys.path.insert(0, OBJ_SRC)
 
-# 现在可以正常导入
-from ps_core.scene_client import PlanningSceneClient
+# ========== 导入 ==========
+# 需要导入 rclpy 和 MoveIt2
+import rclpy
+from rclpy.node import Node
+from pymoveit2 import MoveIt2
+
+# 你的模块
 from ps_objects.object_manager import ObjectManager
 from ps_objects.shape_generator import ShapeGenerator
+
+
+def create_moveit2_node():
+    """创建 MoveIt2 实例"""
+    if not rclpy.ok():
+        rclpy.init()
+    
+    node = Node("list_objects_node")
+    
+    moveit2 = MoveIt2(
+        node=node,
+        joint_names=["panda_joint1", "panda_joint2", "panda_joint3",
+                     "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"],
+        base_link_name="panda_link0",
+        end_effector_name="panda_hand",
+        group_name="panda_arm"
+    )
+    
+    return node, moveit2
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -47,9 +73,6 @@ def main():
   # 按类型排序
   %(prog)s --sort type
   
-  # 按创建时间排序
-  %(prog)s --sort time
-  
   # 使用JSON格式输出
   %(prog)s --json
   
@@ -61,9 +84,6 @@ def main():
   
   # 使用通配符筛选
   %(prog)s --filter "obstacle_*"
-  
-  # 列出空场景信息
-  %(prog)s --verbose
         """
     )
     
@@ -97,69 +117,56 @@ def main():
     
     args = parser.parse_args()
     
+    # 初始化 ROS2 和 MoveIt2
+    node, moveit2 = create_moveit2_node()
+    
     try:
-        # 初始化客户端和工具
-        client = PlanningSceneClient()
-        manager = ObjectManager(client)
+        # 初始化管理器（用 moveit2 替代 client）
+        manager = ObjectManager(moveit2)
         generator = ShapeGenerator()
         
-        # 获取所有物体
+        # 从缓存获取物体列表
         object_ids = manager.list_objects()
         
         if args.filter:
-            # 使用通配符筛选
-            import fnmatch
             filtered_ids = []
             pattern = args.filter
             for obj_id in object_ids:
                 if fnmatch.fnmatch(obj_id, pattern):
                     filtered_ids.append(obj_id)
-            object_ids = filtered_ids        
-        # 获取物体详细信息
+            object_ids = filtered_ids
+        
+        # 从缓存获取详细信息
         objects_info = []
         for obj_id in object_ids:
-            obj_info = manager.get_object_info(obj_id)
+            obj_info = manager.get_object_from_cache(obj_id)
             if obj_info:
-                # 获取场景信息以判断创建时间（简化处理）
-                scene = client.get_current_scene()
                 obj_info['name'] = obj_id
-                
-                # 尝试推断类型（根据形状数量）
-                if obj_info.get('primitive_count', 0) == 1:
-                    obj_info['type_guess'] = 'single_shape'
-                elif obj_info.get('primitive_count', 0) > 1:
-                    obj_info['type_guess'] = 'composite'
-                else:
-                    obj_info['type_guess'] = 'unknown'
-                
                 objects_info.append(obj_info)
         
         # 类型筛选
         if args.type:
-            if args.type.lower() == 'composite':
-                objects_info = [obj for obj in objects_info if obj.get('type_guess') == 'composite']
-            elif args.type.lower() == 'simple':
-                objects_info = [obj for obj in objects_info if obj.get('type_guess') == 'single_shape']
+            type_filter = args.type.lower()
+            objects_info = [obj for obj in objects_info 
+                          if obj.get('type', '').lower() == type_filter]
         
         # 排序
         if args.sort == 'name':
             objects_info.sort(key=lambda x: x['name'])
         elif args.sort == 'type':
-            objects_info.sort(key=lambda x: x.get('type_guess', 'unknown'))
+            objects_info.sort(key=lambda x: x.get('type', 'unknown'))
         
         # 处理空场景
         if not objects_info:
             if args.verbose:
                 print("场景中没有碰撞物体")
-                print(f"场景状态: {len(object_ids)} 个物体ID，但无法获取详细信息")
+                print(f"缓存中有 {len(object_ids)} 个物体ID，但无法获取详细信息")
             elif not args.quiet:
                 print("场景中没有碰撞物体")
             return 0
         
         # 显示模式
         if args.json:
-            # JSON格式输出
-            import json
             output_data = {
                 'count': len(objects_info),
                 'objects': objects_info,
@@ -170,50 +177,42 @@ def main():
                 with open(args.export, 'w') as f:
                     json.dump(output_data, f, indent=2)
                 if not args.quiet:
-                    print(f"已导出到 {args.export}")
+                    print(f"✅ 已导出到 {args.export}")
             else:
                 print(json.dumps(output_data, indent=2))
                 
         elif args.quiet:
-            # 安静模式：只输出ID
             for obj_info in objects_info:
                 print(obj_info['name'])
                 
-        # 在显示详细信息的地方，添加：
         elif args.details:
             print(f"碰撞物体列表 (共 {len(objects_info)} 个)")
             print("=" * 60)
             
             for i, obj_info in enumerate(objects_info, 1):
                 print(f"{i:3d}. {obj_info['name']}")
-                
-                # 尝试从缓存获取更多信息
-                cached = manager.get_object_from_cache(obj_info['name'])
-                if cached:
-                    print(f"     类型: {cached.get('type', 'unknown')}")
-                    print(f"     尺寸: {cached.get('dimensions', [])}")
-                    print(f"     位置: {cached.get('position', [])}")
-                else:
-                    print(f"     类型: {obj_info.get('type_guess', 'unknown')}")
-                
+                print(f"     类型: {obj_info.get('type', 'unknown')}")
+                print(f"     尺寸: {obj_info.get('dimensions', [])}")
+                print(f"     位置: {obj_info.get('position', [])}")
                 print(f"     操作: {obj_info.get('operation', 'unknown')}")
                 print(f"     参考坐标系: {obj_info.get('frame_id', 'unknown')}")
                 print()        
-        else:            
-        # 默认简洁模式
+        else:
             if args.count:
                 print(f"场景中有 {len(objects_info)} 个碰撞物体:")
             
             for i, obj_info in enumerate(objects_info, 1):
-                shape_count = obj_info.get('primitive_count', 0)
-                type_str = obj_info.get('type_guess', 'unknown')
+                obj_type = obj_info.get('type', 'unknown')
+                dimensions = obj_info.get('dimensions', [])
                 
-                if shape_count == 1:
-                    print(f"{i:3d}. {obj_info['name']} (简单形状)")
-                elif shape_count > 1:
-                    print(f"{i:3d}. {obj_info['name']} (复合形状, {shape_count}个部件)")
+                if len(dimensions) == 3:
+                    print(f"{i:3d}. {obj_info['name']} ({obj_type}, {dimensions[0]:.2f}x{dimensions[1]:.2f}x{dimensions[2]:.2f})")
+                elif len(dimensions) == 1:
+                    print(f"{i:3d}. {obj_info['name']} ({obj_type}, r={dimensions[0]:.2f})")
+                elif len(dimensions) == 2:
+                    print(f"{i:3d}. {obj_info['name']} ({obj_type}, r={dimensions[0]:.2f}, h={dimensions[1]:.2f})")
                 else:
-                    print(f"{i:3d}. {obj_info['name']} (未知)")
+                    print(f"{i:3d}. {obj_info['name']} ({obj_type})")
         
         # 导出到其他格式
         if args.export and not args.json:
@@ -222,14 +221,14 @@ def main():
                     import csv
                     with open(args.export, 'w', newline='') as f:
                         writer = csv.writer(f)
-                        writer.writerow(['Name', 'Type', 'Shape Count', 'Frame ID', 'Operation'])
+                        writer.writerow(['Name', 'Type', 'Dimensions', 'Position', 'Frame ID'])
                         for obj_info in objects_info:
                             writer.writerow([
                                 obj_info['name'],
-                                obj_info.get('type_guess', 'unknown'),
-                                obj_info.get('primitive_count', 0),
-                                obj_info.get('frame_id', 'unknown'),
-                                str(obj_info.get('operation', 'unknown'))
+                                obj_info.get('type', 'unknown'),
+                                obj_info.get('dimensions', []),
+                                obj_info.get('position', []),
+                                obj_info.get('frame_id', 'unknown')
                             ])
                     
                 elif args.format == 'txt':
@@ -239,9 +238,9 @@ def main():
                         f.write("=" * 40 + "\n")
                         for obj_info in objects_info:
                             f.write(f"- {obj_info['name']}\n")
-                            f.write(f"  类型: {obj_info.get('type_guess', 'unknown')}\n")
-                            f.write(f"  形状数量: {obj_info.get('primitive_count', 0)}\n")
-                            f.write(f"  参考系: {obj_info.get('frame_id', 'unknown')}\n\n")
+                            f.write(f"  类型: {obj_info.get('type', 'unknown')}\n")
+                            f.write(f"  尺寸: {obj_info.get('dimensions', [])}\n")
+                            f.write(f"  位置: {obj_info.get('position', [])}\n\n")
                 
                 if not args.quiet:
                     print(f"✅ 已导出到 {args.export} ({args.format}格式)")
@@ -260,6 +259,11 @@ def main():
         import traceback
         traceback.print_exc()
         return 1
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
 
 if __name__ == "__main__":
     sys.exit(main())

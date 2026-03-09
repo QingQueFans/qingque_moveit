@@ -50,7 +50,7 @@ try:
     )
     print("[导入] ✓ MoveGroup接口模块")
     
-    from trajectory_execution import get_execution_stats, clear_trajectory_cache
+    from trajectory_execution import TrajectoryExecutor
     print("[导入] ✓ 轨迹执行模块")
     
     # 抓取模块

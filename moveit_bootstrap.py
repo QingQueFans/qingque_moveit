@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MoveIt暴力导入启动器 - 修正路径（带ML插件）
+MoveIt暴力导入启动器 - 修正路径（带所有模块）
 """
 
 import sys
@@ -13,32 +13,34 @@ MOVEIT_ROOT = "/home/diyuanqiongyu/qingfu_moveit"
 
 # 所有可能的路径（基于实际诊断结果）
 ALL_PATHS = [
-    # ========== moveit_core 模块（必须有 moveit_core/ 前缀）==========
+    # ========== moveit_core 模块 ==========
     f"{MOVEIT_ROOT}/moveit_core/planning_scene/core_functions/src",
     f"{MOVEIT_ROOT}/moveit_core/cache_manager/src",
     f"{MOVEIT_ROOT}/moveit_core/planning_scene/collision_objects/src",
     f"{MOVEIT_ROOT}/moveit_core/kinematics/inverse_kinematics/src",
-    
-    # ========== 正运动学模块 ==========
     f"{MOVEIT_ROOT}/moveit_core/kinematics/forward_kinematics/src",
-    
-    # 可选模块
     f"{MOVEIT_ROOT}/moveit_core/planning_scene/collision_detection/src",
     f"{MOVEIT_ROOT}/moveit_core/planning_scene/unified_tools/src",
     f"{MOVEIT_ROOT}/moveit_core/planning_scene/state_validation/src",
     f"{MOVEIT_ROOT}/moveit_core/planning_scene/acm_management/src",
     f"{MOVEIT_ROOT}/moveit_core/planning_scene/visualization/src",
     
-    # ========== ROS相关（路径正确）==========
+    # ========== moveit_plugins 模块 ==========
     f"{MOVEIT_ROOT}/moveit_plugins/moveit_controller_manager/src",
+    f"{MOVEIT_ROOT}/moveit_plugins/kinematics_plugins/ml_seed_predictor/src",
+    
+    # ========== moveit_ros 模块 ==========
     f"{MOVEIT_ROOT}/moveit_ros/move_group/trajectory_execution/src",
     f"{MOVEIT_ROOT}/moveit_ros/grasping/capability_servers/src",
+    f"{MOVEIT_ROOT}/moveit_ros/grasping/capability_servers_core/src",
     f"{MOVEIT_ROOT}/moveit_ros/grasping/grasp_execution/src",
-    f"{MOVEIT_ROOT}/moveit_planners/src",
     f"{MOVEIT_ROOT}/moveit_ros/perception/object_detection/src",
     
-    # ========== 【新增】ML种子预测器插件 ==========
-    f"{MOVEIT_ROOT}/moveit_plugins/kinematics_plugins/ml_seed_predictor/src",
+    # ========== moveit_planners 模块 ==========
+    f"{MOVEIT_ROOT}/moveit_planners/src",
+    
+    # ========== 添加 pymoveit2 路径 ==========
+    f"{MOVEIT_ROOT}/install/pymoveit2/local/lib/python3.10/dist-packages",
 ]
 
 # 智能添加
@@ -63,7 +65,6 @@ def init_moveit_paths(force=False):
     global _MOVEIT_BOOTSTRAP_INITIALIZED
     
     if _MOVEIT_BOOTSTRAP_INITIALIZED and not force:
-        # 已经初始化过，直接返回
         return False
     
     print("🚀 MoveIt暴力启动中...")
@@ -82,15 +83,16 @@ def init_moveit_paths(force=False):
         f"{MOVEIT_ROOT}/moveit_core/planning_scene/acm_management/src",
         f"{MOVEIT_ROOT}/moveit_core/planning_scene/visualization/src",
         f"{MOVEIT_ROOT}/moveit_plugins/moveit_controller_manager/src",
+        f"{MOVEIT_ROOT}/moveit_plugins/kinematics_plugins/ml_seed_predictor/src",
         f"{MOVEIT_ROOT}/moveit_ros/move_group/trajectory_execution/src",
         f"{MOVEIT_ROOT}/moveit_ros/grasping/capability_servers/src",
+        f"{MOVEIT_ROOT}/moveit_ros/grasping/capability_servers_core/src",
         f"{MOVEIT_ROOT}/moveit_ros/grasping/grasp_execution/src",
-        f"{MOVEIT_ROOT}/moveit_planners/src",
         f"{MOVEIT_ROOT}/moveit_ros/perception/object_detection/src",
-        f"{MOVEIT_ROOT}/moveit_plugins/kinematics_plugins/ml_seed_predictor/src",  # ML插件
+        f"{MOVEIT_ROOT}/moveit_planners/src",
+        f"{MOVEIT_ROOT}/install/pymoveit2/local/lib/python3.10/dist-packages",
     ]
     
-    # 智能添加
     added_paths = []
     for path in ALL_PATHS:
         if os.path.exists(path) and path not in sys.path:
@@ -99,11 +101,10 @@ def init_moveit_paths(force=False):
     
     print(f"✅ 已添加 {len(added_paths)} 个路径")
     
-    # 标记为已初始化
     _MOVEIT_BOOTSTRAP_INITIALIZED = True
     return True
 
-# ========== 可选：验证关键模块 ==========
+# ========== 验证关键模块 ==========
 def check_imports():
     """快速检查关键模块"""
     print("\n🔍 检查关键模块...")
@@ -115,8 +116,11 @@ def check_imports():
         ("kin_ik.ik_solver", "IKSolver"),
         ("kin_fk.fk_solver", "FKSolver"),
         ("kin_fk.pose_computer", "PoseComputer"),
-        # 【新增】验证ML插件
         ("ml_seed_predictor", "MLSeedPredictor"),
+        ("pymoveit2", "MoveIt2"),
+        ("gripper_controller_manager", "GripperControllerManager"),
+        ("trajectory_execution", "TrajectoryExecutionManager"),
+        ("capability_servers_core.pick_action_server", "PickActionServer"),
     ]
     
     for module, item in modules:

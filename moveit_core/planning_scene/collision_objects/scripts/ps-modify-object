@@ -1,36 +1,59 @@
 #!/usr/bin/env python3
 """
-修改 PlanningScene 中的碰撞物体 - 缓存增强版
+修改 PlanningScene 中的碰撞物体 - pymoveit2 版
 """
 import sys
 import os
 import argparse
 import json
 import time
+import fnmatch
+
 sys.path.append(os.path.expanduser('~/qingfu_moveit/moveit_core/planning_scene'))
 
-# ========== 关键：设置正确的路径 ==========
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # scripts/
-MODULE_ROOT = os.path.dirname(SCRIPT_DIR)                # collision_objects/
-PROJECT_ROOT = os.path.dirname(MODULE_ROOT)              # planning_scene/
+# ========== 路径设置（原样保留） ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_ROOT = os.path.dirname(SCRIPT_DIR)
+PROJECT_ROOT = os.path.dirname(MODULE_ROOT)
 
-# 添加 core_functions 的 src 到路径
 CORE_SRC = os.path.join(PROJECT_ROOT, 'core_functions', 'src')
 sys.path.insert(0, CORE_SRC)
 
-# 添加 collision_objects 的 src 到路径
 OBJ_SRC = os.path.join(MODULE_ROOT, 'src')
 sys.path.insert(0, OBJ_SRC)
 
-# 现在可以正常导入
-from ps_core.scene_client import PlanningSceneClient
+# ========== 导入 ==========
+import rclpy
+from rclpy.node import Node
+from pymoveit2 import MoveIt2
+
 from ps_objects.object_manager import ObjectManager
 from ps_objects.shape_generator import ShapeGenerator
 from ps_objects.object_validator import ObjectValidator
 
+
+def create_moveit2_node():
+    """创建 MoveIt2 实例"""
+    if not rclpy.ok():
+        rclpy.init()
+    
+    node = Node("modify_object_node")
+    
+    moveit2 = MoveIt2(
+        node=node,
+        joint_names=["panda_joint1", "panda_joint2", "panda_joint3",
+                     "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"],
+        base_link_name="panda_link0",
+        end_effector_name="panda_hand",
+        group_name="panda_arm"
+    )
+    
+    return node, moveit2
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="修改 PlanningScene 中的碰撞物体 - 缓存增强版",
+        description="修改 PlanningScene 中的碰撞物体 - pymoveit2 版",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -74,7 +97,8 @@ def main():
     parser.add_argument('--rename', '-n', type=str,
                        help='重命名物体')
     parser.add_argument('--copy-to', '-c', type=str,
-                       help='复制到新名称')    
+                       help='复制到新名称')
+    
     # 批量修改选项
     parser.add_argument('--pattern', type=str,
                        help='使用通配符模式匹配多个物体')
@@ -101,19 +125,21 @@ def main():
         parser.print_help()
         return 1
     
+    # 初始化 ROS2 和 MoveIt2
+    node, moveit2 = create_moveit2_node()
+    
     try:
-        # 初始化客户端和工具
-        client = PlanningSceneClient()
-        manager = ObjectManager(client)
+        # 初始化管理器
+        manager = ObjectManager(moveit2)
         generator = ShapeGenerator()
-        validator = ObjectValidator(client) if args.validate else None
+        validator = ObjectValidator() if args.validate else None
         
         # 显示缓存信息
         if args.show_cache:
             current_objects = manager.list_objects()
             print("缓存信息:")
             print("=" * 50)
-            print(f"场景中物体数量: {len(current_objects)}")
+            print(f"缓存中物体数量: {len(current_objects)}")
             
             for obj_id in current_objects:
                 cached = manager.get_object_from_cache(obj_id)
@@ -126,15 +152,13 @@ def main():
                     print(f"\n{obj_id}: (无缓存)")
             return 0
         
-        # 获取当前所有物体
+        # 获取缓存中的物体列表
         current_objects = manager.list_objects()
         
         # 确定要修改的物体列表
         objects_to_modify = []
         
         if args.pattern:
-            # 使用通配符匹配
-            import fnmatch
             pattern = args.pattern
             for obj_id in current_objects:
                 if fnmatch.fnmatch(obj_id, pattern):
@@ -147,25 +171,18 @@ def main():
             print(f"找到 {len(objects_to_modify)} 个匹配的物体")
             
         else:
-            # 单个物体
             if args.object_id not in current_objects:
                 print(f"错误：物体 '{args.object_id}' 不存在")
                 print(f"当前存在的物体: {', '.join(current_objects)}")
                 return 1
             
-            objects_to_modify = [args.object_id]        
+            objects_to_modify = [args.object_id]
+        
         # 处理每个要修改的物体
         modifications = []
         
         for obj_id in objects_to_modify:
-            # 在获取缓存前添加：
-            print(f"[调试] object_cache类型: {type(manager.object_cache)}")
-            print(f"[调试] object_cache内容: {manager.object_cache}")
-            print(f"[调试] 尝试获取: '{obj_id}'")
-
             cached_info = manager.get_object_from_cache(obj_id)
-            print(f"[调试] 获取结果: {cached_info}")
-            
             
             if not cached_info:
                 print(f"⚠️  警告：物体 '{obj_id}' 不在缓存中")
@@ -214,7 +231,8 @@ def main():
                 modification['keep_original'] = args.keep_original
                 modification['changes'].append(f"复制到: {args.copy_to}")
             
-            modifications.append(modification)        
+            modifications.append(modification)
+        
         # 显示修改计划
         print(f"\n修改计划 (共 {len(modifications)} 个物体):")
         print("=" * 60)
@@ -228,7 +246,6 @@ def main():
             for change in mod['changes']:
                 print(f"    • {change}")
             
-            # 显示缓存信息
             if mod['cached_info']:
                 cached = mod['cached_info']
                 print(f"    缓存类型: {cached.get('type', 'unknown')}")
@@ -273,9 +290,9 @@ def main():
                         failed_count += 1
                         continue
                     
-                    # 使用缓存信息创建新物体
                     position = mod.get('position', cached_info.get('position', [0, 0, 0.5]))
-                    orientation = mod.get('orientation', cached_info.get('orientation', [0, 0, 0, 1]))
+                    orientation_raw = mod.get('orientation', cached_info.get('orientation', [0, 0, 0, 1]))
+                    orientation = [float(x) for x in orientation_raw] if len(orientation_raw) == 4 else [0,0,0,1]
                     
                     obj_type = cached_info.get('type', 'box')
                     if obj_type == 'box':
@@ -294,7 +311,24 @@ def main():
                             radius=radius,
                             orientation=orientation
                         )
-                    # ... 其他类型类似
+                    elif obj_type == 'cylinder':
+                        radius = cached_info.get('dimensions', [0.1])[0]
+                        height = cached_info.get('dimensions', [0.1, 0.2])[1] if len(cached_info.get('dimensions', [])) > 1 else 0.2
+                        new_obj = generator.create_cylinder(
+                            name=new_id,
+                            position=position,
+                            radius=radius,
+                            height=height,
+                            orientation=orientation
+                        )
+                    else:
+                        size = mod.get('size', [0.1, 0.1, 0.1])
+                        new_obj = generator.create_box(
+                            name=new_id,
+                            position=position,
+                            size=size,
+                            orientation=orientation
+                        )
                     
                     success = manager.add_object_simple(new_obj)
                     
@@ -325,36 +359,20 @@ def main():
                     print(f"   ✅ 使用缓存信息")
                     obj_type = cached_info.get('type', 'box')
                     
-                    # 优先使用用户指定的值，否则用缓存的值
                     position = mod.get('position', cached_info.get('position', [0, 0, 0.5]))
                     size = mod.get('size', cached_info.get('dimensions', [0.1, 0.1, 0.1]))
                     
-                    # 先获取
                     orientation_raw = mod.get('orientation', cached_info.get('orientation', [0, 0, 0, 1]))
-                    
-                    # 再转换
-                    orientation = [
-                        float(orientation_raw[0]),
-                        float(orientation_raw[1]),
-                        float(orientation_raw[2]),
-                        float(orientation_raw[3])
-                    ] if len(orientation_raw) == 4 else [0.0, 0.0, 0.0, 1.0]    
+                    orientation = [float(x) for x in orientation_raw] if len(orientation_raw) == 4 else [0, 0, 0, 1]
                 else:
                     print(f"   ⚠️  使用默认值（无缓存）")
                     obj_type = 'box'
                     position = mod.get('position', [0, 0, 0.5])
                     size = mod.get('size', [0.1, 0.1, 0.1])
                     
-                    # 先获取原始值
                     orientation_raw = mod.get('orientation', [0, 0, 0, 1])
-                    
-                    # 然后转换为float
-                    orientation = [
-                        float(orientation_raw[0]),
-                        float(orientation_raw[1]), 
-                        float(orientation_raw[2]),
-                        float(orientation_raw[3])
-                    ] if len(orientation_raw) == 4 else [0.0, 0.0, 0.0, 1.0]
+                    orientation = [float(x) for x in orientation_raw] if len(orientation_raw) == 4 else [0, 0, 0, 1]
+                
                 # 根据类型创建新物体
                 if obj_type == 'box':
                     new_obj = generator.create_box(
@@ -392,7 +410,6 @@ def main():
                         orientation=orientation
                     )
                 else:
-                    # 默认创建立方体
                     new_obj = generator.create_box(
                         name=new_id,
                         position=position,
@@ -409,7 +426,6 @@ def main():
                     print(f"   位置: {position}")
                     print(f"   尺寸: {size}")
                     
-                    # 验证
                     if validator:
                         result = validator.validate_scene_addition(new_obj)
                         if result['valid']:
@@ -449,6 +465,11 @@ def main():
         import traceback
         traceback.print_exc()
         return 1
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
 
 if __name__ == "__main__":
     sys.exit(main())

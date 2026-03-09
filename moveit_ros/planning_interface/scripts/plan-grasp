@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""
+plan-grasp: 命令行抓取物体
+"""
+
+import sys
+import os
+import argparse
+import json
+
+# ========== 暴力引入路径 ==========
+sys.path.insert(0, "/home/diyuanqiongyu/qingfu_moveit")
+import moveit_bootstrap
+# 再加这一行确保能找到
+sys.path.insert(0, "/home/diyuanqiongyu/qingfu_moveit/moveit_ros/planning_interface/src")
+from planning_interface import Task
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="抓取物体",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  plan-grasp train_1                    # 抓取 train_1
+  plan-grasp train_1 --width 40         # 指定夹爪宽度 40mm
+  plan-grasp train_1 --strategy top     # 指定抓取策略
+  plan-grasp train_1 --json             # JSON 格式输出
+        """
+    )
+    
+    parser.add_argument("object_id", help="物体ID")
+    parser.add_argument("--width", type=float, help="夹爪宽度(mm)")
+    parser.add_argument("--strategy", default="auto", 
+                       choices=["auto", "top_grasp", "side_grasp"],
+                       help="抓取策略 (默认: auto)")
+    parser.add_argument("--approach", type=float, default=0.1,
+                       help="接近距离(m) (默认: 0.1)")
+    parser.add_argument("--timeout", type=float, default=8.0,
+                       help="规划超时(秒) (默认: 8.0)")
+    parser.add_argument("--json", action="store_true",
+                       help="JSON格式输出")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                       help="详细输出")
+    
+    args = parser.parse_args()
+    
+    # 创建任务并执行
+    task = Task("grasp_task")
+    result = task.grasp_object(
+        args.object_id,
+        width_mm=args.width,
+        strategy=args.strategy,
+        approach_distance=args.approach
+    )
+    
+    # 输出结果
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        if result.get("success"):
+            print(f"✅ 成功抓取 {args.object_id}")
+            if args.verbose:
+                print(f"   耗时: {result.get('total_time', 0):.2f}s")
+                for stage in result.get("stages", []):
+                    status = "✅" if stage.get("success") else "❌"
+                    print(f"   {status} {stage.get('name')}")
+        else:
+            print(f"❌ 抓取失败: {result.get('error', '未知错误')}")
+            sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

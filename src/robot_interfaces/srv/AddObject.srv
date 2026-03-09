@@ -1,0 +1,11 @@
+# 请求：物体信息
+string type      # 'box'|'sphere'|'cylinder'
+string object_id
+float64[3] position
+float64[3] size   # 立方体用
+float64 radius    # 球体/圆柱用
+float64 height    # 圆柱用
+---
+# 响应
+bool success
+string message

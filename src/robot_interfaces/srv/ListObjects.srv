@@ -1,0 +1,5 @@
+# 请求：空（不需要参数）
+---
+bool success
+string[] objects
+string message

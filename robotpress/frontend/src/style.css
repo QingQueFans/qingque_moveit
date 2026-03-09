@@ -1,0 +1,234 @@
+@import "tailwindcss";
+
+/* 你原有的其他样式（如果有）可以保留在下面 */
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+}
+/* 将 DevTools 按钮固定在右下角 */
+/* 选择同时有这两个类名的元素 */
+.vue-devtools_archor-btn.paner-entry-btn {
+  background-color: #42b883 !important;  /* Vue 绿 */
+  width: 48px !important;
+  height: 48px !important;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
+}
+/* src/style.css 里加 */
+:root {
+  --quantum-primary: #00cc88;
+  --quantum-dark: #008866;
+  --quantum-light: #e6fff2;
+  --quantum-glow: #00ff9d;
+  --qingque-primary: #1f8a7c;      /* 主色调：青雀服装的深青色[citation:1] */
+  --qingque-secondary: #64b5a6;     /* 辅助色：浅青绿色 */
+  --qingque-accent: #d4af37;        /* 点缀色：金色（发牌元素[citation:1]） */
+  --qingque-dark: #2c3e4e;          /* 深色背景：深蓝黑 */
+  --qingque-light: #e8f0f5;         /* 浅色背景：月白 */
+  --qingque-gold: #f5e6b3;          /* 暖金色：麻将牌背[citation:5] */
+}
+
+.bg-quantum-primary { background-color: var(--quantum-primary); }
+.bg-quantum-dark { background-color: var(--quantum-dark); }
+.text-quantum-primary { color: var(--quantum-primary); }
+.text-quantum-glow { color: var(--quantum-glow); }
+
+/* 云纹背景（用在标题栏）[citation:1] */
+.cloud-pattern {
+  background-image: radial-gradient(circle at 20px 20px, rgba(31, 138, 124, 0.1) 2px, transparent 2px);
+  background-size: 40px 40px;
+  position: relative;
+}
+.cloud-pattern::before {
+  content: "☁";
+  position: absolute;
+  font-size: 12px;
+  color: rgba(31, 138, 124, 0.2);
+  transform: rotate(10deg);
+  pointer-events: none;
+}
+
+/* 水波纹效果（用在卡片边缘）[citation:1] */
+.wave-border {
+  border-bottom: 2px solid var(--qingque-primary);
+  position: relative;
+}
+.wave-border::after {
+  content: "";
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  width: 100%;
+  height: 6px;
+  background: repeating-linear-gradient(
+    45deg,
+    var(--qingque-primary) 0px,
+    var(--qingque-primary) 4px,
+    transparent 4px,
+    transparent 8px
+  );
+  opacity: 0.3;
+}
+
+/* 麻将"發"字元素（用在按钮上）[citation:1] */
+.mahjong-character {
+  position: relative;
+  overflow: hidden;
+}
+.mahjong-character::after {
+  content: "發";
+  position: absolute;
+  bottom: 2px;
+  right: 5px;
+  font-size: 20px;
+  font-weight: bold;
+  color: var(--qingque-accent);
+  opacity: 0.1;
+  transform: rotate(-10deg);
+  font-family: "KaiTi", "楷体", serif;
+}
+
+/* 主卡片样式：像麻将牌一样温润 */
+.qingque-card {
+  background: white;
+  border-radius: 16px 16px 8px 8px;
+  box-shadow: 
+    0 10px 20px rgba(31, 138, 124, 0.1),
+    inset 0 -2px 0 var(--qingque-primary);
+  border-left: 4px solid var(--qingque-primary);
+  transition: all 0.3s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+/* 卡片悬浮效果 - 像摸到好牌 */
+.qingque-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 
+    0 15px 30px rgba(31, 138, 124, 0.2),
+    inset 0 -2px 0 var(--qingque-accent);
+  border-left-color: var(--qingque-accent);
+}
+
+/* 卡片内部的“牌纹” */
+.qingque-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: 
+    linear-gradient(45deg, 
+      rgba(31, 138, 124, 0.02) 25%, 
+      transparent 25%,
+      transparent 50%,
+      rgba(31, 138, 124, 0.02) 50%,
+      rgba(31, 138, 124, 0.02) 75%,
+      transparent 75%,
+      transparent
+    );
+  background-size: 20px 20px;
+  pointer-events: none;
+}
+/* 顶部导航栏 - 像青雀展开的卷轴[citation:1] */
+.qingque-header {
+  background: linear-gradient(135deg, var(--qingque-dark) 0%, #1a2a35 100%);
+  border-bottom: 3px solid var(--qingque-primary);
+  box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+  position: relative;
+}
+
+/* 卷轴两端的装饰 */
+.qingque-header::before,
+.qingque-header::after {
+  content: "";
+  position: absolute;
+  bottom: -3px;
+  width: 30px;
+  height: 10px;
+  background: var(--qingque-primary);
+  border-radius: 0 0 10px 10px;
+}
+.qingque-header::before { left: 20px; }
+.qingque-header::after { right: 20px; }
+
+/* 标题文字 - 带麻将点状装饰 */
+.qingque-title {
+  font-weight: 500;
+  letter-spacing: 2px;
+  text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+  position: relative;
+  display: inline-block;
+}
+.qingque-title::before,
+.qingque-title::after {
+  content: "●";
+  font-size: 8px;
+  color: var(--qingque-accent);
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.qingque-title::before { left: -15px; }
+.qingque-title::after { right: -15px; }
+/* 主要操作按钮 - 像麻将牌 */
+.qingque-btn {
+  background: linear-gradient(145deg, #ffffff, #f0f0f0);
+  border: 2px solid var(--qingque-primary);
+  border-radius: 8px;
+  color: var(--qingque-dark);
+  font-weight: 600;
+  padding: 10px 20px;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.2s;
+  box-shadow: 0 4px 0 var(--qingque-primary);
+}
+
+.qingque-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 0 var(--qingque-accent);
+  border-color: var(--qingque-accent);
+}
+
+.qingque-btn:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 var(--qingque-primary);
+}
+
+/* 按钮上的“牌面”纹理 */
+.qingque-btn .btn-face {
+  position: absolute;
+  top: 2px;
+  right: 5px;
+  font-size: 12px;
+  opacity: 0.3;
+  color: var(--qingque-primary);
+}
+
+/* 任务状态指示器 - 像卜卦结果[citation:1] */
+.qingque-status {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: white;
+  border: 3px solid;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  box-shadow: 0 0 15px currentColor;
+}
+
+.status-idle { border-color: #95a5a6; color: #7f8c8d; }
+.status-running { border-color: #f39c12; color: #e67e22; animation: divination-spin 2s infinite; }
+.status-success { border-color: var(--qingque-primary); color: var(--qingque-primary); }
+.status-failed { border-color: #e74c3c; color: #c0392b; }
+
+/* 占卜旋转动画 */
+@keyframes divination-spin {
+  0% { transform: rotate(0deg); }
+  25% { transform: rotate(10deg); }
+  75% { transform: rotate(-10deg); }
+  100% { transform: rotate(0deg); }
+}
